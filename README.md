@@ -90,6 +90,31 @@ single HTML file, so in any web-based deck (reveal.js, including
 scroll to zoom, click a contact or residue on the map to fly to it, click a legend chip to hide a
 contact type, space to play, arrow keys to step.
 
+### As a talk you walk through with the arrow keys
+
+[`slides/talks/barnase_barstar`](slides/talks/barnase_barstar) is a finished ten-slide talk built from the MD
+and FEP demos: open `slides/talks/barnase_barstar/index.html` in a browser and press → until it ends. Every
+press plays one step: [manim-web](https://github.com/maloyan/manim-web) animations for the diagrams, the real
+cartoons following the trajectory in 3D with distances measured live, a camera that moves into the interface.
+Nothing else is needed while presenting; the 3D slides can still be dragged and zoomed if someone asks.
+
+![One aspartate, four partners](docs/talk_hub.png)
+
+It is built on Ramith Hettiarachchi's
+[live slides template](https://github.com/ramithuh/protein-design-interactive-slides) (a copy is in `slides/`;
+[`slides/AGENTS.md`](slides/AGENTS.md) has its conventions). To make the same kind of talk from your own run:
+
+```bash
+python slides/tools/prep_interface.py top.pdb traj.dcd --chains A D --dt 0.1 --focus D:39 D:29 \
+    --dg dg.csv slides/talks/my_talk/data/interface.json
+```
+
+writes the one data file the slides draw (cartoons, the trajectory, every contact with its occupancy, the
+distances of the `--focus` residues' partners, the FEP curve; needs `mdtraj`). Copy
+`slides/talks/barnase_barstar` to `slides/talks/my_talk`, keep `slides/stage3d.js` (the 3D stage) and rewrite
+the story in the other slide files: the numbers on them are read from the data, the sentences are yours.
+`python slides/tools/check_deck.py slides/talks/my_talk` steps through every slide in a headless browser.
+
 ### From Python
 
 ```python
@@ -157,4 +182,6 @@ demonstration runs, not converged production data: see the notes below.
 Contact detection and the visual language (colours, badges, the map itself) are
 [PandaPPI](https://github.com/pritampanda15/PandaPPI)'s, by Pritam Kumar Panda. The viewer uses
 [3Dmol.js](https://3dmol.csb.pitt.edu) (BSD-3-Clause, bundled in `ppitango/vendor`); the 3D movie
-uses [PyMOL](https://github.com/schrodinger/pymol-open-source). MIT licence.
+uses [PyMOL](https://github.com/schrodinger/pymol-open-source). The talk in `slides/` is built on the
+[live slides template](https://github.com/ramithuh/protein-design-interactive-slides) (MIT), which bundles manim-web,
+three.js, Reveal.js and the Lato font with their licences in `slides/vendor`. MIT licence.

@@ -1,0 +1,3 @@
+talks/*/check/
+talks/*/*.pdf
+__pycache__/

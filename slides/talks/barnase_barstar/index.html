@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The tightest handshake: barnase and barstar</title>
+<!--
+  A live deck (see ../../AGENTS.md): every slide is drawn in the browser by its module in slides/. Arrow keys
+  step through it; nothing else is needed. S speaker notes, O overview, F fullscreen, T dark/light, L laser.
+  The 3D slides can be dragged and zoomed if someone asks, and carry on from where you left them.
+  Data: data/interface.js, written by ../../tools/prep_interface.py from ppi-tango's MD and FEP example runs.
+-->
+<link rel="stylesheet" href="../../vendor/reveal/reveal.css">
+<link rel="stylesheet" href="../../web/deck.css">
+</head>
+<body>
+<div class="reveal"><div class="slides"></div></div>
+
+<script src="../../vendor/reveal/reveal.js"></script>
+<script src="../../vendor/reveal/notes.js"></script>
+<script src="../../vendor/manim-web/manim-web.iife.js"></script>
+<script src="../../web/deck.js"></script>
+<script src="../../web/manim.js"></script>
+<script src="../../web/addons/molstar.js"></script>
+<script src="../../web/addons/cartoon.js"></script>
+<script src="../../web/addons/turntable.js"></script>
+<script src="../../web/addons/atoms.js"></script>
+
+<script src="data/interface.js"></script>
+<script src="slides/stage3d.js"></script>
+
+<script>Deck.sections([[1, 'The pair'], [2, 'What holds on'], [3, 'The quiet hot spot']]); Deck.section(null)</script>
+<script src="slides/title.js"></script>
+
+<script>Deck.section(1)</script>
+<script src="slides/toxin.js"></script>
+<script src="slides/complex.js"></script>
+<script src="slides/map.js"></script>
+
+<script>Deck.section(2)</script>
+<script src="slides/dynamics.js"></script>
+<script src="slides/persistence.js"></script>
+<script src="slides/hub.js"></script>
+
+<script>Deck.section(3)</script>
+<script src="slides/tyrosine.js"></script>
+<script src="slides/fep.js"></script>
+
+<script>Deck.section(null)</script>
+<script src="slides/closing.js"></script>
+
+<script>Deck.start({ title: 'The tightest handshake: barnase and barstar', smoothBack: 'none' });</script>
+</body>
+</html>
