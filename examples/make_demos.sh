@@ -15,6 +15,6 @@ ppitango nma $D/6M0J.pdb --chains A E -o demos/ace2_rbd_nma \
 
 ppitango md $S/md_1brs/top.pdb $S/md_1brs/traj.dcd --chains A D --dt 0.1 -o demos/barnase_barstar_md \
     --title "Barnase–barstar (1BRS) · 20 ns molecular dynamics" --seconds 16 --movie3d --gif
-ppitango fep $S/fep_1brs/top.pdb $S/fep_1brs/window_*.dcd --chains A D --dg $S/fep_1brs/dg.csv \
+ppitango fep $S/fep_1brs/top.pdb $S/fep_1brs/window_*.dcd --chains A D --dg $S/fep_1brs/dg.csv --frames-per-window 10 \
     -o demos/barnase_barstar_fep --label "barstar Tyr29 side chain off" \
     --title "Barnase–barstar · FEP: barstar Tyr29 side chain switched off" --seconds 16 --movie3d

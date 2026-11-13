@@ -7,7 +7,7 @@ dynamics and free energy perturbation.
 static structure. ppi-tango runs it on every frame of a moving complex and turns the result into
 things you can put in a talk:
 
-![Split-screen 3D movie of barnase-barstar](demos/barnase_barstar_md_3d.gif)
+![Split-screen 3D movie of barnase-barstar over 20 ns of molecular dynamics](docs/hero.gif)
 
 | Output | File | What it is |
 | --- | --- | --- |
@@ -68,7 +68,7 @@ contacts that go with it.
 | --- | --- |
 | `--chains A B` | the two chains to follow (default: the pair with most contacts) |
 | `--movie3d` | also render the split-screen 3D movie |
-| `--gif` | also write the 2D movie as a GIF |
+| `--gif` | also convert the movies to GIF (for READMEs and chat; use the MP4 in slides) |
 | `--smooth N` | rolling window over N frames. Contacts hovering around a cutoff would flicker; this turns flicker into fades (default 5 for MD/FEP, off for normal modes) |
 | `--seconds`, `--fps` | movie length and frame rate |
 | `--max-residues` | residues per chain on the 2D map (default 14, the busiest ones) |
@@ -122,8 +122,9 @@ Open the `*_viewer.html` files in a browser after cloning (GitHub does not rende
 ![2D movie of barnase-barstar along its slowest normal mode](demos/barnase_barstar_nma_contacts.gif)
 
 The MD and FEP runs are in [`examples/simulations/simulate.py`](examples/simulations/simulate.py)
-(OpenMM, Amber14SB/TIP3P, 150 mM NaCl, 298 K). They are short demonstration runs, not
-converged production data: see the notes below.
+(OpenMM, Amber14SB/TIP3P, 150 mM NaCl, 298 K); their trajectories are in
+`examples/simulations/output`, so `examples/make_demos.sh` runs as is. They are short
+demonstration runs, not converged production data: see the notes below.
 
 ## How it works, and what to keep in mind
 
@@ -140,10 +141,14 @@ converged production data: see the notes below.
   contacts a collective motion strains, wrong for large amplitudes (bonds between neighbouring
   residues stretch, atoms can overlap). Keep `--rmsd` near 1 Å. Amplitudes and time scales of a
   mode are not physical.
-- **FEP demo.** The example calculation annihilates the Tyr29 side chain beyond Cβ (a
-  pseudo-alanine) with 1 ns per window in complex and free barstar, analysed with MBAR. It is
-  there to show the animation, and its ΔΔG is a rough estimate: sampling is short, and a proper
-  mutation would use a hybrid topology.
+- **FEP demo.** The example calculation annihilates the barstar Tyr29 side chain beyond Cβ (a
+  pseudo-alanine) with 1 ns per window in the complex and in free barstar, analysed with MBAR. It
+  gives ΔΔG = 4.0 ± 0.6 kcal/mol; the measured value for Y29A is about 3.4 kcal/mol (Schreiber &
+  Fersht, 1995). Treat the agreement as encouraging, not as validation: sampling is short, the
+  error bar is statistical only, and a proper mutation would use a hybrid topology.
+- **FEP contacts are geometric.** Alchemical atoms stay in the coordinates while they are being
+  switched off, so a contact drawn at high λ means "these atoms still sit close", not "this
+  interaction still contributes". Watch what the neighbours do as λ grows.
 - **One chain pair at a time.** For an antibody, run heavy-antigen and light-antigen separately.
 - **Residue numbers** follow PandaPPI (name + number, insertion codes ignored).
 

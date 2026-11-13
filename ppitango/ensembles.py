@@ -243,8 +243,9 @@ def fep(top: str, windows: Sequence[str], chains: Optional[Sequence[str]] = None
         is_pdb = w.lower().endswith(('.pdb', '.ent'))
         atoms, coords = _read_trajectory(w if is_pdb else top, None if is_pdb else w, (a, b), 1, frames_per_window)
         stacks.append(coords)
-        # frames of a window fill the stretch up to the next lambda, so the axis keeps moving
-        nxt = lambdas[k + 1] if k + 1 < len(lambdas) else lambdas[k] + (lambdas[k] - lambdas[k - 1] if k else 1)
+        # frames of a window fill the stretch up to the next lambda, so the axis keeps moving;
+        # the last window stays at the final lambda
+        nxt = lambdas[k + 1] if k + 1 < len(lambdas) else lambdas[k]
         lam.append(lambdas[k] + (nxt - lambdas[k]) * np.arange(len(coords)) / len(coords))
     coords = _superpose(np.concatenate(stacks), (atoms.name == 'CA').values)
     x = np.concatenate(lam)
@@ -252,4 +253,5 @@ def fep(top: str, windows: Sequence[str], chains: Optional[Sequence[str]] = None
     return Ensemble(atoms, coords, (a, b), x=x, xlabel='λ (alchemical progress)', kind='fep',
                     title=f'{_name(top)} · free energy perturbation' + (f' · {label}' if label else ''),
                     curve=curve, curve_label='ΔΔG (kcal/mol)' if table is not None else '',
-                    notes=[f'{len(windows)} λ windows, {len(coords)} frames'])
+                    notes=[f'{len(windows)} λ windows, {len(coords)} frames',
+                           'contacts are geometric: decoupled atoms still count'])
