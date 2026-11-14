@@ -202,7 +202,7 @@ the contacts of the reference run (`tests/test_trajectory.py` keeps the core of 
 | OpenMM PDB + DCD, multi-model PDB, FEP windows | unchanged from the demos |
 | 12,800-frame trajectory (150 MB) | 70 s on 8 cores without movies |
 | Antibody heavy + light chain against antigen, protein against both DNA strands (`--select`) | run |
-| Python 3.9 and 3.12, macOS and Linux | pass |
+| Python 3.9 and 3.12 on macOS; 3.10, 3.12 and 3.13 on Linux (CI) | pass |
 
 What does not work, or needs care:
 
