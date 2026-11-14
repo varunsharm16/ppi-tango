@@ -115,6 +115,15 @@ distances of the `--focus` residues' partners, the FEP curve; needs `mdtraj`). C
 the story in the other slide files: the numbers on them are read from the data, the sentences are yours.
 `python slides/tools/check_deck.py slides/talks/my_talk` steps through every slide in a headless browser.
 
+To send a talk to someone, pack it into one file that needs nothing next to it and no network (about 7 MB):
+
+```bash
+python slides/tools/bundle.py slides/talks/barnase_barstar
+```
+
+writes `slides/talks/barnase_barstar/barnase_barstar.html`: attach it to a message or put it on any web host.
+Whoever opens it clicks the slide once, then uses the arrow keys.
+
 ### From Python
 
 ```python

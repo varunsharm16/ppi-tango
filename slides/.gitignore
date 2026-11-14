@@ -1,3 +1,6 @@
 talks/*/check/
 talks/*/*.pdf
 __pycache__/
+# single-file talks written by tools/bundle.py
+talks/*/*.html
+!talks/*/index.html
