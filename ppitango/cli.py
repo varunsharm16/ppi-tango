@@ -7,6 +7,9 @@ from . import __version__, analysis, ensembles
 
 
 def _common(p):
+    p.add_argument('--select', nargs=2, metavar=('SIDE_A', 'SIDE_B'),
+                   help='the two sides as MDAnalysis selections instead of chain IDs, e.g. '
+                        '--select "resid 1-110" "resid 111-199" (md and fep)')
     p.add_argument('--chains', nargs=2, metavar=('A', 'B'),
                    help='the two chains whose interface to follow (default: the pair with most contacts)')
     p.add_argument('-o', '--output', default=None, help='output prefix (default: name of the input file)')
@@ -46,18 +49,21 @@ def main(argv=None):
     _common(p)
 
     p = sub.add_parser('md', help='follow the interface along an MD trajectory',
-                       description='Any trajectory MDAnalysis reads (xtc, dcd, trr, nc ...), or a multi-model PDB.')
-    p.add_argument('topology', help='PDB with chain IDs matching the trajectory (or a multi-model PDB on its own)')
+                       description='Any topology and trajectory MDAnalysis reads (pdb, gro, tpr, prmtop, psf + xtc, trr, dcd, '
+                                   'nc ...), or a multi-model PDB on its own.')
+    p.add_argument('topology', help='structure or topology file holding the same atoms as the trajectory '
+                                    '(pdb, gro, tpr, prmtop, psf), or a multi-model PDB on its own')
     p.add_argument('trajectory', nargs='?', help='trajectory file')
     p.add_argument('--stride', type=int, default=1, help='read every n-th frame (default: 1)')
     p.add_argument('--max-frames', type=int, default=200, help='analyse at most this many frames (default: 200)')
-    p.add_argument('--dt', type=float, default=1.0, help='time between saved frames (default: 1)')
+    p.add_argument('--dt', type=float, default=None,
+                   help='time between saved frames (default: the times stored in the trajectory, else frame numbers)')
     p.add_argument('--unit', default='ns', help='unit of --dt (default: ns)')
     _common(p)
 
     p = sub.add_parser('fep', help='walk through the lambda windows of an alchemical calculation',
                        description='One trajectory (or multi-model PDB) per lambda window, in order.')
-    p.add_argument('topology', help='PDB with chain IDs matching the window trajectories')
+    p.add_argument('topology', help='structure or topology file holding the same atoms as the window trajectories')
     p.add_argument('windows', nargs='+', help='one trajectory per lambda window, in order')
     p.add_argument('--dg', help='CSV with one row per window and a dG column (cumulative, kcal/mol); '
                                 'an optional lambda column sets the axis')
@@ -67,16 +73,18 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
     try:
+        if args.command == 'nma' and args.select:
+            raise ValueError('--select works with md and fep; nma takes --chains')
         if args.command == 'nma':
             ens = ensembles.nma(args.pdb, args.chains, args.mode, args.rmsd, args.frames)
             source = args.pdb
         elif args.command == 'md':
             ens = ensembles.md(args.topology, args.trajectory, args.chains, args.stride, args.max_frames,
-                               args.dt, args.unit)
+                               args.dt, args.unit, args.select)
             source = args.trajectory or args.topology
         else:
             ens = ensembles.fep(args.topology, args.windows, args.chains, args.dg, args.frames_per_window,
-                                args.label)
+                                args.label, args.select)
             source = args.topology
     except (ValueError, ImportError, FileNotFoundError) as e:
         sys.exit(f'ppitango: {e}')
@@ -84,6 +92,11 @@ def main(argv=None):
     prefix = args.output or f'{os.path.splitext(os.path.basename(source))[0]}_{args.command}'
     os.makedirs(os.path.dirname(os.path.abspath(prefix)), exist_ok=True)
     a, b = ens.chains
+    for line in ens.log:
+        print(line)
+    if ens.n_frames < 2:
+        sys.exit('ppitango: only one frame was read, so there is nothing to animate. For a single structure use '
+                 'ppitango nma, or PandaPPI itself for a static map.')
     print(f'{ens.title}: chains {a} and {b}, {ens.n_frames} frames, {len(ens.atoms)} heavy atoms')
     result = analysis.analyze(ens, cutoff=args.distance_cutoff, workers=args.workers)
     if result.contacts.empty:

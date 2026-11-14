@@ -1,0 +1,24 @@
+name: tests
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install ".[md,test]"
+      - run: pytest -q
+      - name: The README commands, as a new user would run them
+        run: |
+          ppitango nma examples/data/1BRS.pdb --chains A D --seconds 3 -o out/nma
+          ppitango md examples/simulations/output/md_1brs/top.pdb examples/simulations/output/md_1brs/traj.dcd \
+            --chains A D --dt 0.1 --max-frames 30 --seconds 3 --gif -o out/md
+          ppitango fep examples/simulations/output/fep_1brs/top.pdb examples/simulations/output/fep_1brs/window_*.dcd \
+            --chains A D --dg examples/simulations/output/fep_1brs/dg.csv --frames-per-window 3 --seconds 3 -o out/fep
+          ls -la out

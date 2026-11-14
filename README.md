@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/header.webp" alt="ppi-tango: it takes two" width="100%"></p>
+
 # ppi-tango
 
 **It takes two.** Animated protein-protein interface contacts from normal modes, molecular
@@ -44,13 +46,39 @@ The elastic network model is built in: no other program needed. `--mode 2` picks
 ### Molecular dynamics: a topology and a trajectory
 
 ```bash
-ppitango md top.pdb traj.dcd --chains A D --dt 0.1 --unit ns
+ppitango md top.pdb traj.dcd --chains A D --dt 0.1          # OpenMM, NAMD: PDB + DCD
+ppitango md md.tpr md.xtc                                   # GROMACS (or md.gro md.xtc)
+ppitango md complex.prmtop md.nc                            # Amber
+ppitango md step5.psf step5.dcd --dt 0.1                    # CHARMM / NAMD
 ```
 
-`top.pdb` must carry chain IDs and match the trajectory's atoms (water, ions and hydrogens are
-dropped automatically). Anything [MDAnalysis](https://www.mdanalysis.org) reads works: xtc, dcd,
-trr, nc. A multi-model PDB on its own works too. A complex split across the periodic box is put
-back together, and frames are fitted onto the first.
+Give the files as your MD program wrote them. The first file is any structure or topology
+[MDAnalysis](https://www.mdanalysis.org) reads (pdb, gro, tpr, prmtop/parm7, psf) that holds **the same atoms
+in the same order** as the trajectory (xtc, trr, dcd, nc ...). Nothing needs preparing by hand:
+
+- **Water, ions, lipids, ligands and hydrogens** are dropped. What stays is every residue with a protein or
+  nucleic acid backbone, whatever the force field calls it (HIE, HSD, CYX ... are understood).
+- **Periodic boxes**: chains cut by the box are made whole and the two partners are put back next to each
+  other in every frame, so a raw trajectory works without `gmx trjconv -pbc` or `cpptraj autoimage`.
+- **Chains.** With chain IDs in the topology, `--chains A D` picks two; left out, the pair with most contacts
+  is followed. Files without chain IDs (gro, prmtop, most psf) get their chains lettered A, B, C ... in file
+  order, split wherever the backbone breaks, and the table is printed so you can pick:
+
+  ```
+  Chains (no chain IDs in the topology: chains lettered in file order, split where the backbone breaks):
+    A: 108 residues, VAL3 to ARG110
+    B: 87 residues, LYS1 to SER89
+  ```
+
+- **Anything else is a selection**: `--select "segid PROA" "segid PROB"`, `--select "resid 1-220" "resid 221-330"`,
+  or a side made of several chains, `--select "chainID H L" "chainID W"` for an antibody against its antigen
+  ([selection language](https://userguide.mdanalysis.org/stable/selections.html)).
+- **Time axis**: read from the trajectory when it stores times (xtc, trr, nc). DCD files do not, so give
+  `--dt` (time between saved frames, with `--unit`), or the axis counts frames.
+- **Long trajectories**: 200 evenly spaced frames are analysed (`--max-frames`, `--stride`), and only those
+  are read, so trajectory length hardly matters.
+
+A multi-model PDB on its own works too.
 
 ### Free energy perturbation: one trajectory per λ window
 
@@ -159,6 +187,47 @@ The MD and FEP runs are in [`examples/simulations/simulate.py`](examples/simulat
 (OpenMM, Amber14SB/TIP3P, 150 mM NaCl, 298 K); their trajectories are in
 `examples/simulations/output`, so `examples/make_demos.sh` runs as is. They are short
 demonstration runs, not converged production data: see the notes below.
+
+## What was tested, and known limits
+
+Version 0.1 was run on the same 195-residue complex as four MD programs write it, and each input had to give
+the contacts of the reference run (`tests/test_trajectory.py` keeps the core of this, and runs on every push):
+
+| Input | Result |
+| --- | --- |
+| GROMACS 2025: `md.tpr` or `md.gro` + raw `md.xtc` (dodecahedron box, water, ions, molecules cut by the box) | same contacts and distances as the `trjconv -pbc mol` trajectory |
+| GROMACS protein-only `.gro`/`.pdb` + `.xtc` | same |
+| Amber: `prmtop` + NetCDF, full system (truncated octahedron) and stripped; `ambpdb`-style PDB without chains | all four agree |
+| CHARMM-style PSF + DCD; PDB with HSD, ILE CD, OT1/OT2 and segment names only | same as reference |
+| OpenMM PDB + DCD, multi-model PDB, FEP windows | unchanged from the demos |
+| 12,800-frame trajectory (150 MB) | 70 s on 8 cores without movies |
+| Antibody heavy + light chain against antigen, protein against both DNA strands (`--select`) | run |
+| Python 3.9 and 3.12, macOS and Linux | pass |
+
+What does not work, or needs care:
+
+- **Topology and trajectory must match atom for atom.** A protein-only trajectory with the full-system
+  topology (or the reverse) stops with an error saying so; write both for the same group of atoms.
+- **A GROMACS `.top` is not accepted** (it has no coordinates or atom order of the built system): give the
+  `.tpr` or `.gro`. A `.tpr` from a GROMACS newer than your MDAnalysis is refused by MDAnalysis; upgrade it
+  (`pip install -U MDAnalysis`) or use the `.gro`.
+- **Residue numbers are the topology's.** A `.tpr` and an Amber `prmtop` number residues 1, 2, 3 ... across
+  all chains, so barstar Asp39 shows up as Asp147. For the original numbers use a `.gro` or PDB of the same
+  atoms as topology.
+- **A side made of several chains** whose residue numbers repeat gets the later chains shifted by whole
+  thousands (light chain 1-214, heavy chain 1001-1231), which is printed. Insertion codes are ignored.
+- **xtc rounds coordinates to 0.01 Å.** A contact sitting exactly on a cutoff can differ between an xtc and
+  a full-precision file of the same run; occupancies are not affected in any way that shows.
+- **Only protein and nucleic acid.** Contacts to ligands, ions, lipids, glycans and water are not shown.
+  Protein-nucleic acid interfaces run, but PandaPPI's detectors are tuned for protein side chains.
+- **Normal modes need two protein chains** (Cα atoms); `nma` takes a PDB file only.
+- **One frame is not an animation**: `md` on a single structure stops; use `nma`, or PandaPPI for a static map.
+- **Residue numbers above 9999** are refused (frames go to PandaPPI as PDB text).
+- **3D movie** needs the `pymol` command and is the slow part (about 3 minutes for a 12 s movie on 8 cores);
+  everything else runs headless on a cluster login node without it.
+- **Windows** has not been tried.
+- **Slides data** (`slides/tools/prep_interface.py`) has only been used with a PDB with chain IDs as topology
+  and a protein-only trajectory; the other inputs above are untested there.
 
 ## How it works, and what to keep in mind
 
