@@ -186,6 +186,63 @@ demonstration runs, not converged production data: see the notes below.
 - **One chain pair at a time.** For an antibody, run heavy-antigen and light-antigen separately.
 - **Residue numbers** follow PandaPPI (name + number, insertion codes ignored).
 
+## Citing
+
+If ppi-tango helps your work, cite this repository and PandaPPI, which does the contact detection:
+
+```
+Varun Sharma. ppi-tango: animated protein-protein interface contacts from normal modes, molecular
+dynamics and free energy perturbation. GitHub repository, https://github.com/varunsharm16/ppi-tango
+
+Pritam Kumar Panda. PandaPPI: mapping and visualizing molecular interactions at protein-protein,
+protein-nucleic acid and antigen-antibody interfaces. GitHub repository,
+https://github.com/pritampanda15/PandaPPI
+```
+
+### References
+
+Structures used in the demos (coordinates from the [RCSB PDB](https://www.rcsb.org)):
+
+- **1BRS**, barnase-barstar: Buckle AM, Schreiber G, Fersht AR (1994). Protein-protein recognition: crystal
+  structural analysis of a barnase-barstar complex at 2.0-Å resolution. *Biochemistry* 33, 8878-8889.
+- **1BJ1**, Fab-VEGF: Muller YA, Chen Y, Christinger HW, Li B, Cunningham BC, Lowman HB, de Vos AM (1998). VEGF
+  and the Fab fragment of a humanized neutralizing antibody: crystal structure of the complex at 2.4 Å
+  resolution and mutational analysis of the interface. *Structure* 6, 1153-1167.
+- **6M0J**, ACE2-SARS-CoV-2 RBD: Lan J, Ge J, Yu J, et al. (2020). Structure of the SARS-CoV-2 spike
+  receptor-binding domain bound to the ACE2 receptor. *Nature* 581, 215-220.
+
+Barnase-barstar numbers quoted in the talk and in the notes above:
+
+- Affinity: Schreiber G, Fersht AR (1993). Interaction of barnase with its polypeptide inhibitor barstar
+  studied by protein engineering. *Biochemistry* 32, 5145-5150. Hartley RW (1993). Directed mutagenesis and
+  barnase-barstar recognition. *Biochemistry* 32, 5978-5984.
+- Y29A and the other interface mutants: Schreiber G, Fersht AR (1995). Energetics of protein-protein
+  interactions: analysis of the barnase-barstar interface by single mutations and double mutant cycles.
+  *J Mol Biol* 248, 478-486.
+
+Methods:
+
+- Normal modes (anisotropic network model): Atilgan AR, Durell SR, Jernigan RL, Demirel MC, Keskin O, Bahar I
+  (2001). Anisotropy of fluctuation dynamics of proteins with an elastic network model. *Biophys J* 80, 505-515.
+- Simulations: Eastman P, et al. (2024). OpenMM 8: molecular dynamics simulation with machine learning
+  potentials. *J Phys Chem B* 128, 109-116.
+- Force field and water: Maier JA, et al. (2015). ff14SB: improving the accuracy of protein side chain and
+  backbone parameters from ff99SB. *J Chem Theory Comput* 11, 3696-3713. Jorgensen WL, et al. (1983). Comparison
+  of simple potential functions for simulating liquid water. *J Chem Phys* 79, 926-935.
+- Free energies (MBAR): Shirts MR, Chodera JD (2008). Statistically optimal analysis of samples from multiple
+  equilibrium states. *J Chem Phys* 129, 124105.
+
+Software ppi-tango reads with or draws with:
+
+- MDAnalysis: Michaud-Agrawal N, Denning EJ, Woolf TB, Beckstein O (2011). MDAnalysis: a toolkit for the
+  analysis of molecular dynamics simulations. *J Comput Chem* 32, 2319-2327.
+- MDTraj (slide data, secondary structure): McGibbon RT, et al. (2015). MDTraj: a modern open library for the
+  analysis of molecular dynamics trajectories. *Biophys J* 109, 1528-1532. Kabsch W, Sander C (1983).
+  Dictionary of protein secondary structure. *Biopolymers* 22, 2577-2637.
+- 3Dmol.js: Rego N, Koes D (2015). 3Dmol.js: molecular visualization with WebGL. *Bioinformatics* 31, 1322-1324.
+- PyMOL: The PyMOL Molecular Graphics System, Schrödinger, LLC.
+- Matplotlib: Hunter JD (2007). Matplotlib: a 2D graphics environment. *Comput Sci Eng* 9, 90-95.
+
 ## Credits
 
 Contact detection and the visual language (colours, badges, the map itself) are
