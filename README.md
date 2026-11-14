@@ -214,15 +214,18 @@ the contacts of the reference run (`tests/test_trajectory.py` keeps the core of 
 | Antibody heavy + light chain against antigen (`--select`) | runs |
 | Protein-DNA (λ repressor-operator, 1LMB): 50 ps of explicit-solvent MD with water, normal modes, and the FEP path on stand-in windows | run; phosphate salt bridges and water-mediated contacts found |
 | Python 3.9 and 3.12 on macOS; 3.10, 3.12, 3.13 on Linux, 3.12 on macOS and Windows (CI) | pass |
-| Alliance Canada cluster (narval) login node: fresh virtualenv, GROMACS files, no display | see below |
+| Alliance Canada cluster (narval) login node, no display: fresh virtualenv from the site wheels (numpy 2.4, MDAnalysis 2.10), `.gro` + raw `.xtc`, `--waters`, normal modes, 2D movie | run; a GROMACS 2026 `.tpr` is too new for MDAnalysis (see below) |
 
 What does not work, or needs care:
 
 - **Topology and trajectory must match atom for atom.** A protein-only trajectory with the full-system
   topology (or the reverse) stops with an error saying so; write both for the same group of atoms.
 - **A GROMACS `.top` is not accepted** (it has no coordinates or atom order of the built system): give the
-  `.tpr` or `.gro`. A `.tpr` from a GROMACS newer than your MDAnalysis is refused by MDAnalysis; upgrade it
-  (`pip install -U MDAnalysis`) or use the `.gro`.
+  `.tpr` or `.gro`.
+- **A `.tpr` from a very new GROMACS** may be ahead of MDAnalysis: GROMACS 2026 files are not read by
+  MDAnalysis 2.10, GROMACS 2025 files not by MDAnalysis 2.7. ppi-tango then uses the `.gro` with the same
+  name next to the `.tpr` if there is one, and says so; otherwise write one
+  (`gmx editconf -f md.tpr -o md.gro`) and give that.
 - **A side made of several chains** whose residue numbers repeat gets the later chains shifted by whole
   thousands (light chain 1-214, heavy chain 1001-1231), which is printed. Insertion codes are ignored.
 - **xtc rounds coordinates to 0.01 Å.** A contact sitting exactly on a cutoff can differ between an xtc and

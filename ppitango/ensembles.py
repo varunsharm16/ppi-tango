@@ -259,8 +259,20 @@ def _universe(top: str, traj: Optional[str]):
                 hint = (' A GROMACS .top is not a structure file: give the .tpr, .gro or a PDB written from the '
                         'same system instead.')
             elif 'tpx version' in str(e):
-                hint = (' The installed MDAnalysis is older than the GROMACS that wrote this .tpr: upgrade it '
-                        '(pip install -U MDAnalysis) or give the .gro of the same system as topology.')
+                # MDAnalysis lags behind new GROMACS releases; the .gro mdrun writes next to the .tpr has the
+                # same atoms and never changes format
+                gro = os.path.splitext(top)[0] + '.gro'
+                if os.path.exists(gro):
+                    try:
+                        u = mda.Universe(gro, traj) if traj else mda.Universe(gro)
+                        u._ppitango_note = (f'{os.path.basename(top)} is from a GROMACS newer than the installed '
+                                            f'MDAnalysis reads: used {os.path.basename(gro)} next to it instead')
+                        return u
+                    except Exception:
+                        pass
+                hint = (' This .tpr is from a GROMACS newer than the installed MDAnalysis reads. Give a .gro of '
+                        f'the same system instead (gmx editconf -f {os.path.basename(top)} -o system.gro), or try '
+                        'pip install -U MDAnalysis.')
             elif 'atoms' in str(e).lower() or 'natoms' in str(e).lower():
                 hint = (' The topology and the trajectory must hold the same atoms in the same order: if the '
                         'trajectory was saved for a subset (protein only), write the topology for that subset too.')
@@ -375,7 +387,7 @@ def _closest_pair(atoms: pd.DataFrame, xyz: np.ndarray, box) -> tuple:
 def _sides(u, chains, select, renumber=None):
     """Which atoms make up side a and side b. Returns (atoms, index, (a, b), log)."""
     atoms, index, table = _polymer(u, renumber)
-    log = []
+    log = [u._ppitango_note] if hasattr(u, '_ppitango_note') else []
     if select:
         if len(select) != 2:
             raise ValueError('Give exactly two selections, e.g. --select "resid 1-110" "resid 111-199"')
