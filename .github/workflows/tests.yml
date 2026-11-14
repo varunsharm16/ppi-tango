@@ -2,11 +2,20 @@ name: tests
 on: [push, pull_request]
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.12", "3.13"]   # the runner image no longer offers 3.9
+        os: [ubuntu-latest]
+        python: ["3.10", "3.12", "3.13"]   # the Linux runner image no longer offers 3.9
+        include:
+          - {os: macos-latest, python: "3.12"}
+          - {os: windows-latest, python: "3.12"}
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

@@ -73,6 +73,15 @@ in the same order** as the trajectory (xtc, trr, dcd, nc ...). Nothing needs pre
 - **Anything else is a selection**: `--select "segid PROA" "segid PROB"`, `--select "resid 1-220" "resid 221-330"`,
   or a side made of several chains, `--select "chainID H L" "chainID W"` for an antibody against its antigen
   ([selection language](https://userguide.mdanalysis.org/stable/selections.html)).
+- **Residue numbers.** A `.tpr` and an Amber `prmtop` count residues 1, 2, 3 ... straight through all chains,
+  so the second chain starts at 109 instead of 1. `--renumber B:1` (chain, number of its first residue) puts
+  a chain back on its own numbers; a `.gro` or PDB as topology keeps the original numbers by itself.
+- **Water-mediated contacts**: `--waters` follows the waters within hydrogen-bond reach of both sides in every
+  frame (give the full-system topology and trajectory, not a stripped one).
+- **Protein-DNA and protein-RNA**: `--select protein nucleic` puts all protein chains on one side and both
+  strands on the other. Hydrogen bonds come from PandaPPI; salt bridges from Arg, Lys and His to backbone
+  phosphates are added by ppi-tango. Works the same for `nma` (the network gets a node at C4' of every
+  nucleotide) and `fep`.
 - **Time axis**: read from the trajectory when it stores times (xtc, trr, nc). DCD files do not, so give
   `--dt` (time between saved frames, with `--unit`), or the axis counts frames.
 - **Long trajectories**: 200 evenly spaced frames are analysed (`--max-frames`, `--stride`), and only those
@@ -138,7 +147,8 @@ python slides/tools/prep_interface.py top.pdb traj.dcd --chains A D --dt 0.1 --f
 ```
 
 writes the one data file the slides draw (cartoons, the trajectory, every contact with its occupancy, the
-distances of the `--focus` residues' partners, the FEP curve; needs `mdtraj`). Copy
+distances of the `--focus` residues' partners, the FEP curve; needs `mdtraj`). It takes the same input files
+as `ppitango md`. Copy
 `slides/talks/barnase_barstar` to `slides/talks/my_talk`, keep `slides/stage3d.js` (the 3D stage) and rewrite
 the story in the other slide files: the numbers on them are read from the data, the sentences are yours.
 `python slides/tools/check_deck.py slides/talks/my_talk` steps through every slide in a headless browser.
@@ -201,8 +211,10 @@ the contacts of the reference run (`tests/test_trajectory.py` keeps the core of 
 | CHARMM-style PSF + DCD; PDB with HSD, ILE CD, OT1/OT2 and segment names only | same as reference |
 | OpenMM PDB + DCD, multi-model PDB, FEP windows | unchanged from the demos |
 | 12,800-frame trajectory (150 MB) | 70 s on 8 cores without movies |
-| Antibody heavy + light chain against antigen, protein against both DNA strands (`--select`) | run |
-| Python 3.9 and 3.12 on macOS; 3.10, 3.12 and 3.13 on Linux (CI) | pass |
+| Antibody heavy + light chain against antigen (`--select`) | runs |
+| Protein-DNA (λ repressor-operator, 1LMB): 50 ps of explicit-solvent MD with water, normal modes, and the FEP path on stand-in windows | run; phosphate salt bridges and water-mediated contacts found |
+| Python 3.9 and 3.12 on macOS; 3.10, 3.12, 3.13 on Linux, 3.12 on macOS and Windows (CI) | pass |
+| Alliance Canada cluster (narval) login node: fresh virtualenv, GROMACS files, no display | see below |
 
 What does not work, or needs care:
 
@@ -211,23 +223,26 @@ What does not work, or needs care:
 - **A GROMACS `.top` is not accepted** (it has no coordinates or atom order of the built system): give the
   `.tpr` or `.gro`. A `.tpr` from a GROMACS newer than your MDAnalysis is refused by MDAnalysis; upgrade it
   (`pip install -U MDAnalysis`) or use the `.gro`.
-- **Residue numbers are the topology's.** A `.tpr` and an Amber `prmtop` number residues 1, 2, 3 ... across
-  all chains, so barstar Asp39 shows up as Asp147. For the original numbers use a `.gro` or PDB of the same
-  atoms as topology.
 - **A side made of several chains** whose residue numbers repeat gets the later chains shifted by whole
   thousands (light chain 1-214, heavy chain 1001-1231), which is printed. Insertion codes are ignored.
 - **xtc rounds coordinates to 0.01 Å.** A contact sitting exactly on a cutoff can differ between an xtc and
   a full-precision file of the same run; occupancies are not affected in any way that shows.
-- **Only protein and nucleic acid.** Contacts to ligands, ions, lipids, glycans and water are not shown.
-  Protein-nucleic acid interfaces run, but PandaPPI's detectors are tuned for protein side chains.
-- **Normal modes need two protein chains** (Cα atoms); `nma` takes a PDB file only.
+- **Only protein and nucleic acid.** Contacts to ligands, ions, lipids and glycans are not shown; water only
+  with `--waters`. For a water-mediated contact the distance shown is between the two residues' atoms, not to
+  the water, and the water itself is not drawn in 3D.
+- **Nucleic acids**: base stacking on aromatic side chains and other π contacts with bases are not detected
+  (PandaPPI's ring definitions cover amino acids), so protein-DNA maps show hydrogen bonds, phosphate salt
+  bridges and water bridges only. Left to itself the tool follows the pair of chains with most contacts,
+  which in a protein-DNA complex is the two DNA strands: say `--select protein nucleic`.
+- **FEP on protein-DNA** was checked for reading and drawing only, with a plain trajectory cut into stand-in
+  windows; no alchemical protein-DNA calculation was run.
 - **One frame is not an animation**: `md` on a single structure stops; use `nma`, or PandaPPI for a static map.
 - **Residue numbers above 9999** are refused (frames go to PandaPPI as PDB text).
 - **3D movie** needs the `pymol` command and is the slow part (about 3 minutes for a 12 s movie on 8 cores);
   everything else runs headless on a cluster login node without it.
-- **Windows** has not been tried.
-- **Slides data** (`slides/tools/prep_interface.py`) has only been used with a PDB with chain IDs as topology
-  and a protein-only trajectory; the other inputs above are untested there.
+- **Windows**: the tests and the README commands pass in CI; the 3D movie (PyMOL) was not tried there.
+- **Slides data** (`slides/tools/prep_interface.py`) reads the same inputs (`--select`, `--renumber` too), but
+  the deck draws protein cartoons: both sides must be protein.
 
 ## How it works, and what to keep in mind
 

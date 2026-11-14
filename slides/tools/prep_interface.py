@@ -65,17 +65,26 @@ def main():
     ap.add_argument("top")
     ap.add_argument("traj")
     ap.add_argument("out", type=Path)
-    ap.add_argument("--chains", nargs=2, required=True)
-    ap.add_argument("--dt", type=float, default=1.0, help="time between trajectory frames, ns")
+    ap.add_argument("--chains", nargs=2, help="the two chains (default: the pair with most contacts)")
+    ap.add_argument("--select", nargs=2, help="the two sides as MDAnalysis selections instead of chains")
+    ap.add_argument("--renumber", nargs="+", default=[], metavar="CHAIN:FIRST",
+                    help="number a chain from this residue on (tpr and prmtop files count straight through)")
+    ap.add_argument("--dt", type=float, default=None,
+                    help="time between trajectory frames, ns (default: the times stored in the trajectory)")
     ap.add_argument("--focus", nargs="*", default=[], help="residues the talk zooms in on, as CHAIN:NUMBER")
     ap.add_argument("--frames", type=int, default=100, help="frames kept for drawing")
     ap.add_argument("--smooth", type=int, default=5, help="rolling mean (frames) on drawn coordinates")
     ap.add_argument("--min-occupancy", type=float, default=0.2, help="contacts rarer than this are left out")
     ap.add_argument("--dg", help="FEP table from ppi-tango's example (window, lambdas, dG_complex, dG_free, dG, dG_err)")
     args = ap.parse_args()
-    a, b = args.chains
-
-    ens = ppitango.md(args.top, args.traj, chains=[a, b], dt=args.dt, max_frames=None)
+    renumber = {c: int(n) for c, n in (item.split(":") for item in args.renumber)} or None
+    ens = ppitango.md(args.top, args.traj, chains=args.chains, select=args.select, renumber=renumber, dt=args.dt,
+                      max_frames=None)
+    a, b = ens.chains
+    for line in ens.log:
+        print(line)
+    if not ens.atoms.name.eq("CA").groupby(ens.atoms.chain).any().all():
+        raise SystemExit("prep_interface: the deck draws protein cartoons, and one side has no amino acids")
     atoms, raw = ens.atoms.reset_index(drop=True), ens.coords
     n_frames = len(raw)
     result = ppitango.analyze(ens, progress=False)
@@ -104,18 +113,16 @@ def main():
     keep = np.unique(np.round(np.linspace(0, n_frames - 1, min(args.frames, n_frames))).astype(int))
 
     # ---- secondary structure ----
+    # from the frame ppi-tango already made whole and stripped, so any topology format works
     import mdtraj
-    t = mdtraj.load(args.top)
-    prot = t.atom_slice(t.topology.select("protein"))
-    dssp = mdtraj.compute_dssp(prot, simplified=True)[0]
-    # mdtraj numbers chains by order; match residues by (order of appearance of chain, resSeq)
-    order = []
-    for line in open(args.top):
-        if line.startswith(("ATOM", "HETATM")) and line[21] not in order:
-            order.append(line[21])
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".pdb") as f:
+        f.write(ens.pdb(0))
+        f.flush()
+        t = mdtraj.load(f.name)
     ss_of = {}
-    for r, code in zip(prot.topology.residues, dssp):
-        ss_of[(order[r.chain.index], r.resSeq)] = code if code in "HE" else "C"
+    for r, code in zip(t.topology.residues, mdtraj.compute_dssp(t, simplified=True)[0]):
+        ss_of[(r.chain.chain_id, r.resSeq)] = code if code in "HE" else "C"
 
     # ---- cartoons ----
     chains = {}

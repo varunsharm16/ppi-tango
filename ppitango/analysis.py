@@ -12,7 +12,35 @@ import pandas as pd
 
 from .ensembles import Ensemble
 
-SKIP = ('Van der Waals', 'Water-mediated')  # atom-level contacts are counted, not drawn; frames carry no water
+SKIP = ('Van der Waals',)   # atom-level contacts are counted, not drawn
+BASIC = {'ARG': ('NH1', 'NH2', 'NE'), 'LYS': ('NZ',), 'HIS': ('ND1', 'NE2')}
+PHOSPHATE = ('OP1', 'OP2')
+
+
+def _phosphate_bridges(pdb_text: str, a: str, b: str, cutoff: float = 4.0):
+    """Salt bridges between basic side chains and backbone phosphates (PandaPPI pairs amino acids only)."""
+    basic, phos = [], []
+    for line in pdb_text.splitlines():
+        if not line.startswith('ATOM'):
+            continue
+        name, resname, chain = line[12:16].strip(), line[17:20].strip(), line[21]
+        item = (chain, f'{resname} {int(line[22:26])}', name, (float(line[30:38]), float(line[38:46]), float(line[46:54])))
+        if name in BASIC.get(resname, ()):
+            basic.append(item)
+        elif name in PHOSPHATE:
+            phos.append(item)
+    best = {}
+    for c1, r1, n1, p1 in basic:
+        for c2, r2, n2, p2 in phos:
+            if c1 == c2:
+                continue
+            d = sum((u - v) ** 2 for u, v in zip(p1, p2)) ** 0.5
+            if d <= cutoff:
+                row = (r1, n1, r2, n2) if c1 == a else (r2, n2, r1, n1)
+                key = (row[0], row[2])
+                if key not in best or d < best[key][-1]:
+                    best[key] = ('Salt bridge / ionic', *row, round(d, 2))
+    return list(best.values())
 
 
 def _frame(job):
@@ -39,6 +67,7 @@ def _frame(job):
             if c1 != a:  # chain a always on the left
                 r1, a1, r2, a2 = r2, a2, r1, a1
             rows.append((t, r1, a1, r2, a2, d))
+    rows += _phosphate_bridges(pdb_text, a, b)
     return rows, [(c, r, area) for (c, r), area in buried.items()]
 
 

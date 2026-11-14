@@ -9,7 +9,10 @@ from . import __version__, analysis, ensembles
 def _common(p):
     p.add_argument('--select', nargs=2, metavar=('SIDE_A', 'SIDE_B'),
                    help='the two sides as MDAnalysis selections instead of chain IDs, e.g. '
-                        '--select "resid 1-110" "resid 111-199" (md and fep)')
+                        '--select "resid 1-110" "resid 111-199"')
+    p.add_argument('--renumber', nargs='+', metavar='CHAIN:FIRST', default=[],
+                   help='number a chain from this residue number on, e.g. --renumber B:1 (tpr and prmtop files count '
+                        'residues straight through all chains)')
     p.add_argument('--chains', nargs=2, metavar=('A', 'B'),
                    help='the two chains whose interface to follow (default: the pair with most contacts)')
     p.add_argument('-o', '--output', default=None, help='output prefix (default: name of the input file)')
@@ -42,7 +45,7 @@ def main(argv=None):
 
     p = sub.add_parser('nma', help='oscillate a complex along an elastic-network normal mode',
                        description='Normal mode analysis needs nothing but a PDB file: the mode is computed here.')
-    p.add_argument('pdb', help='PDB file of the complex')
+    p.add_argument('pdb', help='PDB file of the complex (or any structure file MDAnalysis reads)')
     p.add_argument('--mode', type=int, default=1, help='which mode, 1 = slowest (default: 1)')
     p.add_argument('--rmsd', type=float, default=1.0, help='Cα RMSD at full swing, Å (default: 1.0)')
     p.add_argument('--frames', type=int, default=48, help='frames in one oscillation (default: 48)')
@@ -54,6 +57,8 @@ def main(argv=None):
     p.add_argument('topology', help='structure or topology file holding the same atoms as the trajectory '
                                     '(pdb, gro, tpr, prmtop, psf), or a multi-model PDB on its own')
     p.add_argument('trajectory', nargs='?', help='trajectory file')
+    p.add_argument('--waters', action='store_true',
+                   help='also follow water-mediated contacts (needs the water in topology and trajectory)')
     p.add_argument('--stride', type=int, default=1, help='read every n-th frame (default: 1)')
     p.add_argument('--max-frames', type=int, default=200, help='analyse at most this many frames (default: 200)')
     p.add_argument('--dt', type=float, default=None,
@@ -65,6 +70,8 @@ def main(argv=None):
                        description='One trajectory (or multi-model PDB) per lambda window, in order.')
     p.add_argument('topology', help='structure or topology file holding the same atoms as the window trajectories')
     p.add_argument('windows', nargs='+', help='one trajectory per lambda window, in order')
+    p.add_argument('--waters', action='store_true',
+                   help='also follow water-mediated contacts (needs the water in topology and trajectory)')
     p.add_argument('--dg', help='CSV with one row per window and a dG column (cumulative, kcal/mol); '
                                 'an optional lambda column sets the axis')
     p.add_argument('--frames-per-window', type=int, default=8, help='frames analysed per window (default: 8)')
@@ -73,18 +80,21 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
     try:
-        if args.command == 'nma' and args.select:
-            raise ValueError('--select works with md and fep; nma takes --chains')
+        try:
+            renumber = {c: int(n) for c, n in (item.split(':') for item in args.renumber)} or None
+        except ValueError:
+            raise ValueError('--renumber takes CHAIN:FIRST items, e.g. --renumber A:3 B:1')
         if args.command == 'nma':
-            ens = ensembles.nma(args.pdb, args.chains, args.mode, args.rmsd, args.frames)
+            ens = ensembles.nma(args.pdb, args.chains, args.mode, args.rmsd, args.frames, select=args.select,
+                                renumber=renumber)
             source = args.pdb
         elif args.command == 'md':
             ens = ensembles.md(args.topology, args.trajectory, args.chains, args.stride, args.max_frames,
-                               args.dt, args.unit, args.select)
+                               args.dt, args.unit, args.select, renumber, args.waters)
             source = args.trajectory or args.topology
         else:
             ens = ensembles.fep(args.topology, args.windows, args.chains, args.dg, args.frames_per_window,
-                                args.label, args.select)
+                                args.label, args.select, renumber, args.waters)
             source = args.topology
     except (ValueError, ImportError, FileNotFoundError) as e:
         sys.exit(f'ppitango: {e}')

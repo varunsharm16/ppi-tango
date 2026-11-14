@@ -12,6 +12,11 @@ import pandas as pd
 # protonation / force-field variants -> the names PandaPPI's detectors know
 RESNAME_ALIASES = {'HIE': 'HIS', 'HID': 'HIS', 'HIP': 'HIS', 'HSD': 'HIS', 'HSE': 'HIS', 'HSP': 'HIS',
                    'CYX': 'CYS', 'CYM': 'CYS', 'ASH': 'ASP', 'GLH': 'GLU', 'LYN': 'LYS', 'MSE': 'MET'}
+# force-field atom names -> PDB names (terminal oxygens, CHARMM's isoleucine CD)
+ATOM_ALIASES = {('ILE', 'CD'): 'CD1', 'OT1': 'O', 'OC1': 'O', 'O1': 'O', 'OT2': 'OXT', 'OC2': 'OXT', 'O2': 'OXT'}
+# nucleotides: CHARMM words, Amber terminal forms (DA5, DG3, DCN) and old PDB spellings -> DA DT DG DC / A U G C
+NUCLEOTIDES = {'ADE': 'A', 'GUA': 'G', 'CYT': 'C', 'THY': 'T', 'URA': 'U'}
+WATER = {'HOH', 'WAT', 'SOL', 'TIP3', 'TIP', 'TIP4', 'TP3', 'T3P', 'T4P', 'SPC', 'OPC', 'H2O'}
 SOLVENT = {'HOH', 'WAT', 'SOL', 'TIP3', 'TIP', 'NA', 'CL', 'K', 'NA+', 'CL-', 'SOD', 'CLA', 'POT', 'MG', 'CA', 'ZN'}
 
 
@@ -28,6 +33,7 @@ class Ensemble:
     curve: Optional[np.ndarray] = None   # an extra per-frame series drawn on the timeline (FEP: ΔG)
     curve_label: str = ''
     notes: List[str] = field(default_factory=list)
+    waters: Optional[list] = None  # per frame: oxygen positions of the waters between the two sides
     log: List[str] = field(default_factory=list)     # what was decided while reading (chains found, box handling)
 
     @property
@@ -36,16 +42,41 @@ class Ensemble:
 
     def pdb(self, frame: int) -> str:
         """One frame as PDB text."""
-        return _pdb_text(self.atoms, self.coords[frame])
+        return _pdb_text(self.atoms, self.coords[frame], self.waters[frame] if self.waters is not None else None)
 
 
-def _pdb_text(atoms: pd.DataFrame, xyz: np.ndarray) -> str:
+def _pdb_text(atoms: pd.DataFrame, xyz: np.ndarray, waters: Optional[np.ndarray] = None) -> str:
     lines = []
     for i, (a, (x, y, z)) in enumerate(zip(atoms.itertuples(), xyz), 1):
         name = a.name if len(a.name) == 4 else f' {a.name:<3}'
         lines.append(f'ATOM  {i % 100000:5d} {name} {a.resname:>3} {a.chain}{a.resnum:4d}    '
                      f'{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00          {a.element:>2}')
+    if waters is not None:   # interface waters ride along in the first chain, as PDB files carry them
+        chain = atoms.chain.iloc[0]
+        for k, (x, y, z) in enumerate(waters, 1):
+            lines.append(f'HETATM{(len(atoms) + k) % 100000:5d}  O   HOH {chain}{k % 10000:4d}    '
+                         f'{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00           O')
     return '\n'.join(lines) + '\nEND\n'
+
+
+def canonical(resname: str, name: str, ribose: bool = False):
+    """Force-field residue and atom names -> the PDB names PandaPPI's detectors know."""
+    name = name.replace('*', "'")
+    name = {'O1P': 'OP1', 'O2P': 'OP2', 'C5M': 'C7'}.get(name, name)
+    resname = RESNAME_ALIASES.get(resname, resname)
+    base = resname
+    if len(base) == 3 and base[0] in 'DR' and base[1] in 'ACGTU' and base[2] in '53N':   # Amber DA5, RU3, DCN
+        base = base[:2]
+    elif len(base) == 2 and base[0] in 'ACGTU' and base[1] in '53':                      # Amber RNA A5, U3
+        base = base[0]
+    if base in NUCLEOTIDES:                         # CHARMM uses one word for DNA and RNA: the sugar decides
+        base = NUCLEOTIDES[base] if ribose else 'D' + NUCLEOTIDES[base]
+    elif base in ('RA', 'RC', 'RG', 'RU'):
+        base = base[1]
+    if base in ('DA', 'DT', 'DG', 'DC', 'DU', 'A', 'U', 'G', 'C'):
+        return base, name
+    name = ATOM_ALIASES.get((resname, name), ATOM_ALIASES.get(name, name))
+    return resname, name
 
 
 def read_pdb(path: str, chains: Optional[Sequence[str]] = None, all_models: bool = False):
@@ -74,7 +105,8 @@ def read_pdb(path: str, chains: Optional[Sequence[str]] = None, all_models: bool
                     or line[16] not in ' A' or (chains and chain not in chains):
                 continue
             if first:
-                rows.append((chain, RESNAME_ALIASES.get(resname, resname), int(line[22:26]), name, element))
+                resname, name = canonical(resname, name)
+                rows.append((chain, resname, int(line[22:26]), name, element))
                 index.append(n)
             xyz.append((float(line[30:38]), float(line[38:46]), float(line[46:54])))
     if xyz:
@@ -108,8 +140,9 @@ def pick_chains(path: str, chains: Optional[Sequence[str]]) -> tuple:
     return pair
 
 
-def _superpose(coords: np.ndarray, sel: np.ndarray) -> np.ndarray:
-    """Fit every frame onto the first, using the selected atoms (Kabsch)."""
+def _superpose(coords: np.ndarray, sel: np.ndarray, extras: Optional[list] = None) -> np.ndarray:
+    """Fit every frame onto the first, using the selected atoms (Kabsch). `extras` holds further points per
+    frame (waters) that are moved along, in place."""
     ref = coords[0, sel]
     ref_c = ref.mean(0)
     out = np.empty_like(coords)
@@ -119,6 +152,8 @@ def _superpose(coords: np.ndarray, sel: np.ndarray) -> np.ndarray:
         d = np.sign(np.linalg.det(u @ vt))
         rot = u @ np.diag([1, 1, d]) @ vt
         out[i] = (xyz - c) @ rot + ref_c
+        if extras is not None:
+            extras[i] = (extras[i] - c) @ rot + ref_c
     return out
 
 
@@ -148,41 +183,50 @@ def anm_modes(ca: np.ndarray, cutoff: float = 15.0, n_modes: int = 20):
 
 
 def nma(pdb: str, chains: Optional[Sequence[str]] = None, mode: int = 1, rmsd: float = 1.0,
-        frames: int = 48, cutoff: float = 15.0) -> Ensemble:
-    """One oscillation along an elastic-network normal mode of the two-chain complex.
+        frames: int = 48, cutoff: float = 15.0, select: Optional[Sequence[str]] = None,
+        renumber: Optional[dict] = None) -> Ensemble:
+    """One oscillation along an elastic-network normal mode of the two-sided complex.
 
-    Each residue moves rigidly with its Cα, and the mode is scaled so the Cα RMSD from the
-    starting structure peaks at `rmsd` Å.
+    The network has one node per residue: Cα for amino acids, C4' for nucleotides. Each residue moves rigidly
+    with its node, and the mode is scaled so the node RMSD from the starting structure peaks at `rmsd` Å.
+    `pdb` is a PDB file; with `select`, or for any other structure file, it is read through MDAnalysis.
     """
-    a, b = pick_chains(pdb, chains)
-    atoms, coords, _ = read_pdb(pdb, (a, b))
-    xyz = coords[0]
+    log = []
+    if select or renumber or not pdb.lower().endswith(('.pdb', '.ent')):
+        u = _universe(pdb, None)
+        atoms, index, (a, b), log = _sides(u, chains, select, renumber)
+        xyz = u.atoms.positions[index].astype(float)
+        box = u.trajectory.ts.dimensions
+        if box is not None and box[:3].min() > 0:
+            xyz = _whole(xyz, (atoms.chain == b).values, u.trajectory.ts.triclinic_dimensions.astype(float))
+    else:
+        a, b = pick_chains(pdb, chains)
+        atoms, coords, _ = read_pdb(pdb, (a, b))
+        xyz = coords[0]
     res_key = atoms.chain + atoms.resnum.astype(str)
-    is_ca = (atoms.name == 'CA').values
-    ca_of = dict(zip(res_key[is_ca], range(is_ca.sum())))
-    missing = ~res_key.isin(ca_of)
-    if missing.any():  # residues without a Cα (nucleotides, truncated residues) cannot be moved
-        atoms, xyz, res_key, is_ca = atoms[~missing.values].reset_index(drop=True), xyz[~missing.values], \
-            res_key[~missing.values], is_ca[~missing.values]
+    is_node = atoms.name.isin(['CA', "C4'"]).values
+    node_of = dict(zip(res_key[is_node], range(is_node.sum())))
+    missing = ~res_key.isin(node_of)
+    if missing.any():  # residues without a node atom (truncated residues) cannot be moved
+        atoms, xyz, res_key, is_node = atoms[~missing.values].reset_index(drop=True), xyz[~missing.values], \
+            res_key[~missing.values], is_node[~missing.values]
     gone = [c for c in (a, b) if not (atoms.chain == c).any()]
     if gone:
-        raise ValueError(f'Normal modes move residues with their Cα atom and chain {" and ".join(gone)} has none '
-                         '(a nucleic acid?). Choose two protein chains with --chains.')
-    vals, modes = anm_modes(xyz[is_ca], cutoff, n_modes=max(mode, 1))
+        raise ValueError(f"Chain {' and '.join(gone)} has no Cα or C4' atoms to build the elastic network on")
+    vals, modes = anm_modes(xyz[is_node], cutoff, n_modes=max(mode, 1))
     disp = modes[mode - 1]
-    disp = disp / np.sqrt((disp ** 2).sum(-1).mean()) * rmsd      # Cα RMSD = rmsd at full swing
-    per_atom = disp[res_key.map(ca_of).values]
+    disp = disp / np.sqrt((disp ** 2).sum(-1).mean()) * rmsd      # node RMSD = rmsd at full swing
+    per_atom = disp[res_key.map(node_of).values]
     phase = np.arange(frames) / frames
     stack = xyz[None] + np.sin(2 * np.pi * phase)[:, None, None] * per_atom[None]
+    nodes = "Cα" + (" and C4'" if (atoms.name == "C4'").any() else '')
     return Ensemble(atoms, stack, (a, b), x=phase, xlabel=f'Phase of normal mode {mode} (cycles)', kind='nma',
-                    title=f'{_name(pdb)} · normal mode {mode}', periodic=True,
-                    notes=[f'Elastic network model (Cα, {cutoff:g} Å cutoff), mode {mode}, ±{rmsd:g} Å Cα RMSD'])
+                    title=f'{_name(pdb)} · normal mode {mode}', periodic=True, log=log,
+                    notes=[f'Elastic network model ({nodes}, {cutoff:g} Å cutoff), mode {mode}, ±{rmsd:g} Å RMSD'])
 
 
 # ---------------------------------------------------------------- trajectories
 
-# force-field atom names -> the PDB names PandaPPI's detectors know
-ATOM_ALIASES = {('ILE', 'CD'): 'CD1', 'OT1': 'O', 'OC1': 'O', 'O1': 'O', 'OT2': 'OXT', 'OC2': 'OXT', 'O2': 'OXT'}
 TIMED = ('XTC', 'TRR', 'NCDF', 'TNG', 'H5MD')   # trajectory formats that store a real time (ps) per frame
 LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
 
@@ -225,7 +269,7 @@ def _universe(top: str, traj: Optional[str]):
     return u
 
 
-def _polymer(u):
+def _polymer(u, renumber: Optional[dict] = None):
     """Heavy atoms of protein and nucleic acid residues, with a chain label for every atom.
 
     Returns (atoms, index, table): `atoms` has one row per kept atom (chain, segid, resname, resnum, name,
@@ -255,13 +299,9 @@ def _polymer(u):
     if not len(index):
         raise ValueError('No protein or nucleic acid found in the topology')
 
-    resname = _attr(ag, 'resnames')[index]
-    name = names[index]
-    resname = np.array([RESNAME_ALIASES.get(r, r) for r in resname])
-    name = np.array([ATOM_ALIASES.get((r, n), n) for r, n in zip(resname, name)])
-    # a C-terminal oxygen pair is O/OXT only on protein residues; nucleic acids keep O2 and friends
-    is_prot = protein[resix[index]]
-    name = np.where(is_prot, [ATOM_ALIASES.get(n, n) for n in name], name)
+    ribose = has("O2'", 'O2*')[resix[index]]
+    pairs = [canonical(r, n, rib) for r, n, rib in zip(_attr(ag, 'resnames')[index], names[index], ribose)]
+    resname, name = np.array([q[0] for q in pairs]), np.array([q[1] for q in pairs])
     resnum = ag.resids[index]
     segid = _attr(ag, 'segids')
     segid = segid[index] if segid is not None else np.full(len(index), '')
@@ -300,6 +340,11 @@ def _polymer(u):
 
     atoms = pd.DataFrame({'chain': chain, 'segid': segid, 'resname': resname, 'resnum': resnum, 'name': name,
                           'element': np.char.upper(elements[index])})
+    for c, first in (renumber or {}).items():   # tpr and prmtop files count residues 1, 2, 3 ... through all chains
+        if c not in set(chain):
+            raise ValueError(f'--renumber: no chain {c}. Chains: {", ".join(dict.fromkeys(chain))}')
+        rows = atoms.chain == c
+        atoms.loc[rows, 'resnum'] += first - atoms.resnum[rows].iloc[0]
     rows = []
     for c, g in atoms.groupby('chain', sort=False):
         first, last = g.iloc[0], g.iloc[-1]
@@ -327,9 +372,9 @@ def _closest_pair(atoms: pd.DataFrame, xyz: np.ndarray, box) -> tuple:
     return pair
 
 
-def _sides(u, chains, select):
+def _sides(u, chains, select, renumber=None):
     """Which atoms make up side a and side b. Returns (atoms, index, (a, b), log)."""
-    atoms, index, table = _polymer(u)
+    atoms, index, table = _polymer(u, renumber)
     log = []
     if select:
         if len(select) != 2:
@@ -416,23 +461,57 @@ def _whole(xyz: np.ndarray, b_sel: np.ndarray, box: np.ndarray) -> np.ndarray:
     return xyz
 
 
+def _interface_waters(u, ts, index, atoms, b_sel, xyz, box):
+    """Oxygens of waters within hydrogen-bond reach (3.5 Å) of both sides, placed at the image next to the complex."""
+    from MDAnalysis.lib.distances import capped_distance
+    wat = u._ppitango_water
+    if not len(wat):
+        return np.zeros((0, 3))
+    polar = atoms.element.isin(['N', 'O']).values
+    near = []
+    for side in (~b_sel, b_sel):
+        pairs = capped_distance(ts.positions[index[side & polar]], ts.positions[wat], 3.5, box=ts.dimensions,
+                                return_distances=False)
+        near.append(set(pairs[:, 1]) if len(pairs) else set())
+    both = sorted(near[0] & near[1])
+    w = ts.positions[wat[both]].astype(float)
+    if len(w) and box is not None:   # put each water at the image closest to the (already whole) complex
+        inv = np.linalg.inv(box)
+        ref = xyz[polar]
+        for k in range(len(w)):
+            d = ref - w[k]
+            d -= np.round(d @ inv) @ box
+            j = (d ** 2).sum(1).argmin()
+            w[k] = ref[j] - d[j]
+    return w
+
+
 def _read_trajectory(top: str, traj: Optional[str], chains, stride: int = 1, max_frames: Optional[int] = None,
-                     select=None):
+                     select=None, renumber=None, waters: bool = False):
     """Coordinates of the two sides from a multi-model PDB, or from topology + trajectory (MDAnalysis).
 
-    Returns (atoms, coords, (a, b), times, log); `times` is in ps when the trajectory stores them, else None.
+    Returns (atoms, coords, (a, b), times, log, waters); `times` is in ps when the trajectory stores them, else
+    None; `waters` is a list of oxygen positions per frame when asked for, else None.
     """
-    if traj is None and top.lower().endswith(('.pdb', '.ent')) and not select:
+    if traj is None and top.lower().endswith(('.pdb', '.ent')) and not (select or renumber or waters):
         a, b = pick_chains(top, chains)
         atoms, coords, _ = read_pdb(top, (a, b), all_models=True)
         keep = np.arange(len(coords))[::stride]
         if max_frames and len(keep) > max_frames:
             keep = keep[np.linspace(0, len(keep) - 1, max_frames).round().astype(int)]
         order = np.r_[np.where(atoms.chain == a)[0], np.where(atoms.chain == b)[0]]
-        return atoms.iloc[order].reset_index(drop=True), coords[keep][:, order], (a, b), None, []
+        return atoms.iloc[order].reset_index(drop=True), coords[keep][:, order], (a, b), None, [], None
     import warnings
     u = _universe(top, traj)
-    atoms, index, (a, b), log = _sides(u, chains, select)
+    atoms, index, (a, b), log = _sides(u, chains, select, renumber)
+    found = None
+    if waters:
+        names, resnames = _attr(u.atoms, 'names'), _attr(u.atoms, 'resnames')
+        u._ppitango_water = np.where(np.isin(resnames, list(WATER)) & np.isin(names, ['O', 'OW', 'OH2', 'OW1']))[0]
+        if not len(u._ppitango_water):
+            raise ValueError('--waters: no water molecules in these files (the trajectory was saved without '
+                             'solvent?). Give the full-system topology and trajectory.')
+        found = []
     keep = np.arange(len(u.trajectory))[::stride]
     if max_frames and len(keep) > max_frames:   # choose the frames first: long trajectories are never read whole
         keep = keep[np.linspace(0, len(keep) - 1, max_frames).round().astype(int)]
@@ -441,11 +520,15 @@ def _read_trajectory(top: str, traj: Optional[str], chains, stride: int = 1, max
     for i in keep:
         ts = u.trajectory[i]
         xyz = ts.positions[index].astype(float)
+        box = None
         if ts.dimensions is not None and ts.dimensions[:3].min() > 0:
             before = xyz.copy()
-            xyz = _whole(xyz, b_sel, ts.triclinic_dimensions.astype(float))
+            box = ts.triclinic_dimensions.astype(float)
+            xyz = _whole(xyz, b_sel, box)
             unwrapped |= bool(np.abs(xyz - before).max() > 1)
         frames.append(xyz)
+        if waters:
+            found.append(_interface_waters(u, ts, index, atoms, b_sel, xyz, box))
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')   # "Reader has no dt information" for single structures
             times.append(ts.time)
@@ -453,18 +536,21 @@ def _read_trajectory(top: str, traj: Optional[str], chains, stride: int = 1, max
         log.append('Periodic box: chains were made whole and put back next to each other')
     times = np.array(times, dtype=float)
     timed = u.trajectory.format in TIMED and len(times) > 1 and (np.diff(times) > 0).all()
-    return atoms, np.array(frames), (a, b), times if timed else None, log
+    if waters:
+        log.append(f'Interface waters: {np.mean([len(w) for w in found]):.1f} per frame on average sit within '
+                   '3.5 Å of both sides')
+    return atoms, np.array(frames), (a, b), times if timed else None, log, found
 
 
 def _fit_atoms(atoms: pd.DataFrame) -> np.ndarray:
-    """Atoms frames are superposed on: Cα and nucleic acid P, or everything if there are too few."""
-    sel = atoms.name.isin(['CA', 'P']).values
+    """Atoms frames are superposed on: Cα and nucleotide C4', or everything if there are too few."""
+    sel = atoms.name.isin(['CA', "C4'"]).values
     return sel if sel.sum() >= 3 else np.ones(len(atoms), bool)
 
 
 def md(top: str, traj: Optional[str] = None, chains: Optional[Sequence[str]] = None, stride: int = 1,
        max_frames: Optional[int] = 200, dt: Optional[float] = None, unit: str = 'ns',
-       select: Optional[Sequence[str]] = None) -> Ensemble:
+       select: Optional[Sequence[str]] = None, renumber: Optional[dict] = None, waters: bool = False) -> Ensemble:
     """A molecular dynamics trajectory.
 
     `top` is any structure or topology file MDAnalysis reads that holds the same atoms as `traj` (pdb, gro,
@@ -474,7 +560,8 @@ def md(top: str, traj: Optional[str] = None, chains: Optional[Sequence[str]] = N
     between saved frames in `unit`; left out, the times stored in the trajectory are used (xtc, trr, nc), or
     the axis counts frames.
     """
-    atoms, coords, (a, b), times, log = _read_trajectory(top, traj, chains, stride, max_frames, select)
+    atoms, coords, (a, b), times, log, wat = _read_trajectory(top, traj, chains, stride, max_frames, select,
+                                                              renumber, waters)
     if dt is not None:
         x, xlabel = _frame_numbers(top, traj, stride, max_frames, len(coords)) * dt, f'Time ({unit})'
     elif times is not None:
@@ -484,12 +571,10 @@ def md(top: str, traj: Optional[str] = None, chains: Optional[Sequence[str]] = N
         x, xlabel, unit = _frame_numbers(top, traj, stride, max_frames, len(coords)).astype(float), 'Frame', 'frames'
         log.append('No frame times known: the axis counts frames. Give --dt (time between saved frames) for a '
                    'time axis')
-    coords = _superpose(coords, _fit_atoms(atoms))
-    ens = Ensemble(atoms, coords, (a, b), x=x, xlabel=xlabel, kind='md',
-                   title=f'{_name(traj or top)} · molecular dynamics',
-                   notes=[f'{len(coords)} frames over {x[-1] - x[0]:g} {unit}'])
-    ens.log = log
-    return ens
+    coords = _superpose(coords, _fit_atoms(atoms), wat)
+    return Ensemble(atoms, coords, (a, b), x=x, xlabel=xlabel, kind='md', waters=wat, log=log,
+                    title=f'{_name(traj or top)} · molecular dynamics',
+                    notes=[f'{len(coords)} frames over {x[-1] - x[0]:g} {unit}'])
 
 
 def _frame_numbers(top, traj, stride, max_frames, n_kept) -> np.ndarray:
@@ -507,13 +592,14 @@ def _frame_numbers(top, traj, stride, max_frames, n_kept) -> np.ndarray:
 
 
 def fep(top: str, windows: Sequence[str], chains: Optional[Sequence[str]] = None, dg: Optional[str] = None,
-        frames_per_window: int = 8, label: str = '', select: Optional[Sequence[str]] = None) -> Ensemble:
+        frames_per_window: int = 8, label: str = '', select: Optional[Sequence[str]] = None,
+        renumber: Optional[dict] = None, waters: bool = False) -> Ensemble:
     """Free energy perturbation: one trajectory (or multi-model PDB) per lambda window, in order.
 
     `dg` is a CSV with one row per window and a `dG` column (cumulative free energy, kcal/mol);
     an optional `lambda` column sets the axis, otherwise windows are spaced evenly from 0 to 1.
     """
-    stacks, lam, log = [], [], []
+    stacks, lam, log, wat = [], [], [], [] if waters else None
     table = pd.read_csv(dg) if dg else None
     if table is not None and len(table) != len(windows):
         raise ValueError(f'{dg} has {len(table)} rows but there are {len(windows)} windows')
@@ -524,8 +610,11 @@ def fep(top: str, windows: Sequence[str], chains: Optional[Sequence[str]] = None
         np.linspace(0, 1, len(windows))
     for k, w in enumerate(windows):
         is_pdb = w.lower().endswith(('.pdb', '.ent'))
-        atoms, coords, pair, _, log_k = _read_trajectory(w if is_pdb else top, None if is_pdb else w, chains, 1,
-                                                         frames_per_window, select)
+        atoms, coords, pair, _, log_k, wat_k = _read_trajectory(w if is_pdb else top, None if is_pdb else w,
+                                                                chains, 1, frames_per_window, select, renumber,
+                                                                waters)
+        if waters:
+            wat += wat_k
         chains = chains or (None if select else pair)   # later windows follow the pair found in the first
         log = log or log_k
         stacks.append(coords)
@@ -533,13 +622,11 @@ def fep(top: str, windows: Sequence[str], chains: Optional[Sequence[str]] = None
         # the last window stays at the final lambda
         nxt = lambdas[k + 1] if k + 1 < len(lambdas) else lambdas[k]
         lam.append(lambdas[k] + (nxt - lambdas[k]) * np.arange(len(coords)) / len(coords))
-    coords = _superpose(np.concatenate(stacks), _fit_atoms(atoms))
+    coords = _superpose(np.concatenate(stacks), _fit_atoms(atoms), wat)
     x = np.concatenate(lam)
     curve = np.interp(x, lambdas, table['dG'].values) if table is not None else None
-    ens = Ensemble(atoms, coords, pair, x=x, xlabel='λ (alchemical progress)', kind='fep',
-                   title=f'{_name(top)} · free energy perturbation' + (f' · {label}' if label else ''),
-                   curve=curve, curve_label='ΔΔG (kcal/mol)' if table is not None else '',
-                   notes=[f'{len(windows)} λ windows, {len(coords)} frames',
-                          'contacts are geometric: decoupled atoms still count'])
-    ens.log = log
-    return ens
+    return Ensemble(atoms, coords, pair, x=x, xlabel='λ (alchemical progress)', kind='fep', waters=wat, log=log,
+                    title=f'{_name(top)} · free energy perturbation' + (f' · {label}' if label else ''),
+                    curve=curve, curve_label='ΔΔG (kcal/mol)' if table is not None else '',
+                    notes=[f'{len(windows)} λ windows, {len(coords)} frames',
+                           'contacts are geometric: decoupled atoms still count'])

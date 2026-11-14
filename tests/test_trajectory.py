@@ -87,3 +87,56 @@ def test_side_of_two_chains_is_renumbered():
     assert any('shifted' in line for line in ens.log)
     side = ens.atoms[ens.atoms.chain == 'A']
     assert side.resnum.max() > 1000
+
+
+def test_renumber_restores_original_numbers(wrapped):
+    """tpr and prmtop files count residues straight through; --renumber puts a chain back on its own numbers."""
+    ens = ensembles.md(*wrapped, renumber={'A': 1, 'B': 501})
+    assert ens.atoms.resnum[ens.atoms.chain == 'A'].min() == 1
+    assert ens.atoms.resnum[ens.atoms.chain == 'B'].min() == 501
+    with pytest.raises(ValueError, match='no chain Q'):
+        ensembles.md(*wrapped, renumber={'Q': 1})
+
+
+def test_force_field_nucleotide_names():
+    assert ensembles.canonical('DA5', "O1P") == ('DA', 'OP1')
+    assert ensembles.canonical('THY', "C5M") == ('DT', 'C7')
+    assert ensembles.canonical('URA', "O2*", ribose=True) == ('U', "O2'")
+    assert ensembles.canonical('RG3', 'N1') == ('G', 'N1')
+    assert ensembles.canonical('HSD', 'OT1') == ('HIS', 'O')
+    assert ensembles.canonical('ILE', 'CD') == ('ILE', 'CD1')
+    assert ensembles.canonical('DT', 'O2') == ('DT', 'O2')      # a base oxygen, not a C-terminus
+
+
+def test_phosphate_salt_bridge():
+    pdb = ('ATOM      1  NZ  LYS A  10       0.000   0.000   0.000  1.00  0.00           N\n'
+           'ATOM      2  OP1  DG B   5       3.000   0.000   0.000  1.00  0.00           O\n'
+           'ATOM      3  OP2  DG B   6       9.000   0.000   0.000  1.00  0.00           O\n')
+    assert analysis._phosphate_bridges(pdb, 'A', 'B') == [('Salt bridge / ionic', 'LYS 10', 'NZ', 'DG 5', 'OP1', 3.0)]
+    assert analysis._phosphate_bridges(pdb, 'B', 'A')[0][1:3] == ('DG 5', 'OP1')   # side a always first
+
+
+def test_interface_water_is_followed(tmp_path):
+    """One water put between the two chains is picked up, moved with the frame and reported by PandaPPI."""
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        u = mda.Universe(TOP)
+    polar = u.select_atoms('(name N* or name O*) and not name H*')
+    a, b = polar.select_atoms('chainID A'), polar.select_atoms('chainID D')
+    d = np.linalg.norm(a.positions[:, None] - b.positions[None], axis=-1)
+    i, j = np.argwhere((d > 5.0) & (d < 5.6))[0]
+    w = (a.positions[i] + b.positions[j]) / 2
+    lines = [l for l in open(TOP) if l.startswith(('CRYST1', 'ATOM'))]
+    water = [f'HETATM{9000 + k:5d} {n:<4} HOH W   1    {x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00           {n[0]}\n'
+             for k, (n, (x, y, z)) in enumerate([(' O', w), (' H1', w + 0.9), (' H2', w - 0.9)])]
+    far = [f'HETATM 9900  O   HOH W   2    {w[0] + 30:8.3f}{w[1]:8.3f}{w[2]:8.3f}  1.00  0.00           O\n']
+    top = tmp_path / 'wet.pdb'
+    top.write_text(''.join(['MODEL        1\n'] + lines + water + far + ['ENDMDL\n'] +
+                           ['MODEL        2\n'] + lines + water + far + ['ENDMDL\n']))
+    ens = ensembles.md(str(top), chains=['A', 'D'], waters=True)
+    assert [len(x) for x in ens.waters] == [1, 1]
+    types = set(analysis.analyze(ens, workers=1, progress=False).contacts.type)
+    assert 'Water-mediated' in types
+    with pytest.raises(ValueError, match='no water'):
+        ensembles.md(TOP, TRAJ, chains=['A', 'D'], waters=True, max_frames=2)
