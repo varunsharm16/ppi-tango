@@ -239,6 +239,34 @@ def _attr(group, name):
         return None
 
 
+def _gromacs_include_dir():
+    """The force field folder of a GROMACS installation (share/gromacs/top), which a .top includes files from."""
+    import os
+    import shutil
+    found = [os.environ.get('GMXLIB'), os.path.join(os.environ.get('GMXDATA', ''), 'top')]
+    for exe in ('gmx', 'gmx_mpi', 'gmx_d'):
+        path = shutil.which(exe)
+        if path:
+            for start in (path, os.path.realpath(path)):
+                found.append(os.path.join(os.path.dirname(os.path.dirname(start)), 'share', 'gromacs', 'top'))
+    return next((d for d in found if d and os.path.isdir(d)), None)
+
+
+def _is_gromacs_top(path: str) -> bool:
+    """.top is the extension of both a GROMACS topology and an Amber prmtop; the Amber one starts with %VERSION."""
+    if not path.lower().endswith(('.top', '.itp')):
+        return False
+    with open(path, errors='replace') as f:
+        return not f.read(200).lstrip().startswith('%')
+
+
+def _open(mda, top, traj):
+    if not _is_gromacs_top(top):
+        return mda.Universe(top, traj) if traj else mda.Universe(top)
+    include = _gromacs_include_dir()
+    return mda.Universe(top, traj, topology_format='ITP', **({'include_dir': include} if include else {}))
+
+
 def _universe(top: str, traj: Optional[str]):
     try:
         import MDAnalysis as mda
@@ -249,36 +277,42 @@ def _universe(top: str, traj: Optional[str]):
     for f in (top, traj):
         if f and not os.path.exists(f):
             raise FileNotFoundError(f'No such file: {f}')
+    if _is_gromacs_top(top) and not traj:
+        raise ValueError(f'{os.path.basename(top)} lists the atoms but holds no coordinates: give a trajectory '
+                         'with it, or the .gro or .tpr instead')
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')  # MDAnalysis is chatty about PDB records and future changes
         try:
-            u = mda.Universe(top, traj) if traj else mda.Universe(top)
+            return _open(mda, top, traj)
         except Exception as e:
             hint = ''
-            if top.lower().endswith('.top'):
-                hint = (' A GROMACS .top is not a structure file: give the .tpr, .gro or a PDB written from the '
-                        'same system instead.')
+            name = os.path.basename(top)
+            if _is_gromacs_top(top) and isinstance(e, (OSError, KeyError)):
+                hint = (' A GROMACS .top includes force field files from the GROMACS installation: load GROMACS '
+                        'first (so that gmx is on the PATH, or GMXDATA is set), keep the .itp files it includes '
+                        'next to it, or give the .gro or .tpr of the same system instead.')
             elif 'tpx version' in str(e):
-                # MDAnalysis lags behind new GROMACS releases; the .gro mdrun writes next to the .tpr has the
-                # same atoms and never changes format
-                gro = os.path.splitext(top)[0] + '.gro'
-                if os.path.exists(gro):
+                # MDAnalysis lags behind new GROMACS releases. The .gro mdrun writes next to the .tpr holds the
+                # same atoms and never changes format, and so does the .top the .tpr was made from
+                stem, folder = os.path.splitext(top)[0], os.path.dirname(top)
+                for other in (stem + '.gro', stem + '.top', os.path.join(folder, 'topol.top')):
+                    if not os.path.exists(other) or (other.endswith('.top') and not traj):
+                        continue
                     try:
-                        u = mda.Universe(gro, traj) if traj else mda.Universe(gro)
-                        u._ppitango_note = (f'{os.path.basename(top)} is from a GROMACS newer than the installed '
-                                            f'MDAnalysis reads: used {os.path.basename(gro)} next to it instead')
-                        return u
+                        u = _open(mda, other, traj)
                     except Exception:
-                        pass
-                hint = (' This .tpr is from a GROMACS newer than the installed MDAnalysis reads. Give a .gro of '
-                        f'the same system instead (gmx editconf -f {os.path.basename(top)} -o system.gro), or try '
-                        'pip install -U MDAnalysis.')
+                        continue
+                    u._ppitango_note = (f'{name} is from a GROMACS newer than the installed MDAnalysis reads: '
+                                        f'used {os.path.basename(other)} next to it instead')
+                    return u
+                hint = (' This .tpr is from a GROMACS newer than the installed MDAnalysis reads. Give the .gro or '
+                        f'the .top of the same system instead (gmx editconf -f {name} -o system.gro writes a '
+                        '.gro), or try pip install -U MDAnalysis.')
             elif 'atoms' in str(e).lower() or 'natoms' in str(e).lower():
                 hint = (' The topology and the trajectory must hold the same atoms in the same order: if the '
                         'trajectory was saved for a subset (protein only), write the topology for that subset too.')
             raise ValueError(f'Could not read {top}' + (f' with {traj}' if traj else '') +
                              f': {type(e).__name__}: {e}.{hint}') from e
-    return u
 
 
 def _polymer(u, renumber: Optional[dict] = None):
@@ -298,11 +332,15 @@ def _polymer(u, renumber: Optional[dict] = None):
     nucleic = has("C4'", 'C4*')
     elements = _attr(ag, 'elements')
     bare = np.array([n.lstrip('0123456789') for n in names])
-    if elements is not None and (elements != '').all():
-        hydrogen = np.isin(np.char.upper(elements), ('H', 'D'))
+    first = np.array([n[:1] for n in bare])
+    if elements is None:
+        elements = first
     else:
-        hydrogen = np.array([n[:1] == 'H' for n in bare])
-        elements = np.array([n[:1] for n in bare])
+        # an element the atom name does not start with was guessed from a force-field atom type (a GROMACS .top
+        # calls a histidine nitrogen NA, which reads as sodium): the name is the better guide in a polymer
+        agrees = np.array([bool(e) and n.upper().startswith(e.upper()) for e, n in zip(elements, bare)])
+        elements = np.where(agrees | (np.char.upper(elements) == 'D'), elements, first)
+    hydrogen = np.isin(np.char.upper(elements), ('H', 'D'))
     altloc = _attr(ag, 'altLocs')
     keep = (protein | nucleic)[resix] & ~hydrogen
     if altloc is not None:

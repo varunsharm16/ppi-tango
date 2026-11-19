@@ -52,10 +52,10 @@ def main(argv=None):
     _common(p)
 
     p = sub.add_parser('md', help='follow the interface along an MD trajectory',
-                       description='Any topology and trajectory MDAnalysis reads (pdb, gro, tpr, prmtop, psf + xtc, trr, dcd, '
+                       description='Any topology and trajectory MDAnalysis reads (pdb, gro, tpr, top, prmtop, psf + xtc, trr, dcd, '
                                    'nc ...), or a multi-model PDB on its own.')
     p.add_argument('topology', help='structure or topology file holding the same atoms as the trajectory '
-                                    '(pdb, gro, tpr, prmtop, psf), or a multi-model PDB on its own')
+                                    '(pdb, gro, tpr, top, prmtop, psf), or a multi-model PDB on its own')
     p.add_argument('trajectory', nargs='?', help='trajectory file')
     p.add_argument('--waters', action='store_true',
                    help='also follow water-mediated contacts (needs the water in topology and trajectory)')

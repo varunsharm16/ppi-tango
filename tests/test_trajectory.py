@@ -140,3 +140,28 @@ def test_interface_water_is_followed(tmp_path):
     assert 'Water-mediated' in types
     with pytest.raises(ValueError, match='no water'):
         ensembles.md(TOP, TRAJ, chains=['A', 'D'], waters=True, max_frames=2)
+
+
+def test_gromacs_top(tmp_path, reference, wrapped):
+    """A GROMACS .top as the topology: one molecule type per chain, and force-field atom types that look like
+    other elements (the histidine nitrogen type NA is not sodium)."""
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        u = mda.Universe(wrapped[0])
+    cut = int(np.where(np.diff(u.atoms.resids) < 0)[0][0]) + 1            # first atom of the second chain
+    text = '[ defaults ]\n1 2 yes 0.5 0.8333\n\n'
+    for mol, atoms in (('Protein_chain_A', u.atoms[:cut]), ('Protein_chain_D', u.atoms[cut:])):
+        text += f'[ moleculetype ]\n{mol} 3\n\n[ atoms ]\n'
+        for i, a in enumerate(atoms, 1):
+            kind = 'NA' if a.name in ('ND1', 'NE2') else a.name[0]
+            text += f'{i} {kind} {a.resid} {a.resname} {a.name} {i} 0.0 12.0\n'
+        text += '\n'
+    text += '[ system ]\ntest\n\n[ molecules ]\nProtein_chain_A 1\nProtein_chain_D 1\n'
+    top = tmp_path / 'topol.top'
+    top.write_text(text)
+    ens = ensembles.md(str(top), wrapped[1], renumber={'B': 1})   # a .top counts residues on through the chains
+    assert ens.chains == ('A', 'B')
+    assert _contacts(ens)[0].equals(reference[0])
+    with pytest.raises(ValueError, match='no coordinates'):
+        ensembles.md(str(top), None)

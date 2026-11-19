@@ -47,13 +47,13 @@ The elastic network model is built in: no other program needed. `--mode 2` picks
 
 ```bash
 ppitango md top.pdb traj.dcd --chains A D --dt 0.1          # OpenMM, NAMD: PDB + DCD
-ppitango md md.tpr md.xtc                                   # GROMACS (or md.gro md.xtc)
+ppitango md md.tpr md.xtc                                   # GROMACS (or md.gro, or topol.top, + md.xtc)
 ppitango md complex.prmtop md.nc                            # Amber
 ppitango md step5.psf step5.dcd --dt 0.1                    # CHARMM / NAMD
 ```
 
 Give the files as your MD program wrote them. The first file is any structure or topology
-[MDAnalysis](https://www.mdanalysis.org) reads (pdb, gro, tpr, prmtop/parm7, psf) that holds **the same atoms
+[MDAnalysis](https://www.mdanalysis.org) reads (pdb, gro, tpr, top, prmtop/parm7, psf) that holds **the same atoms
 in the same order** as the trajectory (xtc, trr, dcd, nc ...). Nothing needs preparing by hand:
 
 - **Water, ions, lipids, ligands and hydrogens** are dropped. What stays is every residue with a protein or
@@ -73,8 +73,8 @@ in the same order** as the trajectory (xtc, trr, dcd, nc ...). Nothing needs pre
 - **Anything else is a selection**: `--select "segid PROA" "segid PROB"`, `--select "resid 1-220" "resid 221-330"`,
   or a side made of several chains, `--select "chainID H L" "chainID W"` for an antibody against its antigen
   ([selection language](https://userguide.mdanalysis.org/stable/selections.html)).
-- **Residue numbers.** A `.tpr` and an Amber `prmtop` count residues 1, 2, 3 ... straight through all chains,
-  so the second chain starts at 109 instead of 1. `--renumber B:1` (chain, number of its first residue) puts
+- **Residue numbers.** A `.tpr`, a GROMACS `.top` and an Amber `prmtop` count residues 1, 2, 3 ... straight through all chains,
+  so the second chain starts at 109 or 111 instead of 1. `--renumber B:1` (chain, number of its first residue) puts
   a chain back on its own numbers; a `.gro` or PDB as topology keeps the original numbers by itself.
 - **Water-mediated contacts**: `--waters` follows the waters within hydrogen-bond reach of both sides in every
   frame (give the full-system topology and trajectory, not a stripped one).
@@ -206,6 +206,7 @@ the contacts of the reference run (`tests/test_trajectory.py` keeps the core of 
 | Input | Result |
 | --- | --- |
 | GROMACS 2025: `md.tpr` or `md.gro` + raw `md.xtc` (dodecahedron box, water, ions, molecules cut by the box) | same contacts and distances as the `trjconv -pbc mol` trajectory |
+| GROMACS 2026: `topol.top` (with the `.itp` files `pdb2gmx` wrote) or `md.tpr` + raw `md.xtc`, MDAnalysis 2.11 | same contacts and distances as `md.gro` + `md.xtc` |
 | GROMACS protein-only `.gro`/`.pdb` + `.xtc` | same |
 | Amber: `prmtop` + NetCDF, full system (truncated octahedron) and stripped; `ambpdb`-style PDB without chains | all four agree |
 | CHARMM-style PSF + DCD; PDB with HSD, ILE CD, OT1/OT2 and segment names only | same as reference |
@@ -220,12 +221,15 @@ What does not work, or needs care:
 
 - **Topology and trajectory must match atom for atom.** A protein-only trajectory with the full-system
   topology (or the reverse) stops with an error saying so; write both for the same group of atoms.
-- **A GROMACS `.top` is not accepted** (it has no coordinates or atom order of the built system): give the
-  `.tpr` or `.gro`.
-- **A `.tpr` from a very new GROMACS** may be ahead of MDAnalysis: GROMACS 2026 files are not read by
-  MDAnalysis 2.10, GROMACS 2025 files not by MDAnalysis 2.7. ppi-tango then uses the `.gro` with the same
-  name next to the `.tpr` if there is one, and says so; otherwise write one
-  (`gmx editconf -f md.tpr -o md.gro`) and give that.
+- **A GROMACS `.top` needs a trajectory and the files it includes.** It lists the atoms without coordinates,
+  so it works for `md` and `fep` with a trajectory, not on its own (normal modes need the `.gro`). Its
+  `#include` lines are followed: the chain `.itp` files must sit next to it, and the force field is looked up
+  in the GROMACS installation (`gmx` on the `PATH`, or `GMXDATA`/`GMXLIB` set, so `module load gromacs`
+  first on a cluster). Without GROMACS at hand, give the `.gro` or `.tpr`.
+- **A `.tpr` from a very new GROMACS** may be ahead of MDAnalysis: GROMACS 2026 files are read from
+  MDAnalysis 2.11 on, not by 2.10; GROMACS 2025 files not by 2.7. ppi-tango then uses the `.gro` or `.top`
+  with the same name next to the `.tpr` (or `topol.top`) if there is one, and says so; otherwise write a
+  `.gro` (`gmx editconf -f md.tpr -o md.gro`) and give that, or `pip install -U MDAnalysis`.
 - **A side made of several chains** whose residue numbers repeat gets the later chains shifted by whole
   thousands (light chain 1-214, heavy chain 1001-1231), which is printed. Insertion codes are ignored.
 - **xtc rounds coordinates to 0.01 Å.** A contact sitting exactly on a cutoff can differ between an xtc and
