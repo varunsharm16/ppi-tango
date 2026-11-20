@@ -140,8 +140,11 @@ function drawContacts(f) {
     const o = c.occ[f];
     if (o < 0.35 || !visible(c)) return;
     const a = P(f, c.ia[f]), b = P(f, c.ib[f]), t = TYPE[c.type], sel = selected === k;
-    shapes.push(viewer.addCylinder({start: a, end: b, radius: sel ? 0.13 : 0.07, color: t.color, dashed: true,
-                                    dashLength: 0.28, gapLength: 0.16, fromCap: 1, toCap: 1, opacity: Math.min(1, o + 0.15)}));
+    const w = c.water && c.water[f] ? {x: c.water[f][0], y: c.water[f][1], z: c.water[f][2]} : null;
+    for (const [p, q] of w ? [[a, w], [w, b]] : [[a, b]])   // a water-mediated contact goes through its water
+      shapes.push(viewer.addCylinder({start: p, end: q, radius: sel ? 0.13 : 0.07, color: t.color, dashed: true,
+                                      dashLength: 0.28, gapLength: 0.16, fromCap: 1, toCap: 1, opacity: Math.min(1, o + 0.15)}));
+    if (w) shapes.push(viewer.addSphere({center: w, radius: 0.45, color: '#E64B35', opacity: Math.min(1, o + 0.15)}));
     if (mode === 'all' || sel || (mode === 'key' && t.directional))
       labels.push(viewer.addLabel(c.dist[f].toFixed(1) + ' Å', {
         position: {x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2}, fontSize: sel ? 15 : 12,
@@ -153,7 +156,7 @@ function drawContacts(f) {
     position: P(f, i), fontSize: 11, fontColor: INK, backgroundColor: COL[key[0]], backgroundOpacity: 0.85,
     borderThickness: 0, inFront: true, screenOffset: {x: 8, y: -8}})));
 }
-const short = r => { const [n, i] = r.split(' '); return (n.length === 3 ? n[0] + n.slice(1).toLowerCase() : n) + ' ' + i; };
+const short = r => { const [n, i] = r.split(' '); return (D.amino.includes(n) ? n[0] + n.slice(1).toLowerCase() : n) + ' ' + i; };
 
 // ---- camera: coordinates arrive with chain a on the left, chain b on the right, interface edge-on
 const S = Math.SQRT1_2;
@@ -266,10 +269,10 @@ D.right.forEach(r => addNode(r, xR, rY[r.res], 'start', CB));
 function focusContact(k) {
   selected = selected === k ? null : k;
   const c = D.contacts[k];
-  if (selected !== null) { ++camJob; viewer.zoomTo({or: [{chain: CA, resi: +c.ra.split(' ')[1]}, {chain: CB, resi: +c.rb.split(' ')[1]}]}, 700); }
+  if (selected !== null) { ++camJob; viewer.zoomTo({or: [{chain: CA, resi: D.number[CA][c.ra]}, {chain: CB, resi: D.number[CB][c.rb]}]}, 700); }
   refresh();
 }
-function focusResidue(chain, res) { selected = null; ++camJob; viewer.zoomTo({chain, resi: +res.split(' ')[1], expand: 6}, 700); refresh(); }
+function focusResidue(chain, res) { selected = null; ++camJob; viewer.zoomTo({chain, resi: D.number[chain][res], expand: 6}, 700); refresh(); }
 
 // ---- legend chips toggle contact types
 D.types.forEach(t => {

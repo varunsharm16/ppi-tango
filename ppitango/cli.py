@@ -9,12 +9,14 @@ from . import __version__, analysis, ensembles
 def _common(p):
     p.add_argument('--select', nargs=2, metavar=('SIDE_A', 'SIDE_B'),
                    help='the two sides as MDAnalysis selections instead of chain IDs, e.g. '
-                        '--select "resid 1-110" "resid 111-199"')
+                        '--select "resid 1-110" "resid 111-199"; a selection without protein in it makes a ligand, '
+                        'ion or sugar a side: --select protein "resname LIG"')
     p.add_argument('--renumber', nargs='+', metavar='CHAIN:FIRST', default=[],
-                   help='number a chain from this residue number on, e.g. --renumber B:1 (tpr and prmtop files count '
-                        'residues straight through all chains)')
+                   help='number a chain from this residue number on, e.g. --renumber B:1 (a tpr without its gro, '
+                        'and a plain prmtop, count residues straight through all chains)')
     p.add_argument('--chains', nargs=2, metavar=('A', 'B'),
-                   help='the two chains whose interface to follow (default: the pair with most contacts)')
+                   help='the two chains whose interface to follow (default: the pair with most contacts; protein against '
+                        'nucleic acid when both are there)')
     p.add_argument('-o', '--output', default=None, help='output prefix (default: name of the input file)')
     out = p.add_argument_group('outputs (default: 2D movie + interactive viewer + CSV tables)')
     out.add_argument('--movie3d', action='store_true',
@@ -54,8 +56,9 @@ def main(argv=None):
     p = sub.add_parser('md', help='follow the interface along an MD trajectory',
                        description='Any topology and trajectory MDAnalysis reads (pdb, gro, tpr, top, prmtop, psf + xtc, trr, dcd, '
                                    'nc ...), or a multi-model PDB on its own.')
-    p.add_argument('topology', help='structure or topology file holding the same atoms as the trajectory '
-                                    '(pdb, gro, tpr, top, prmtop, psf), or a multi-model PDB on its own')
+    p.add_argument('topology', help='structure or topology file of the system (pdb, gro, tpr, top, prmtop, psf), '
+                                    'or a multi-model PDB on its own. A trajectory saved for part of it (protein '
+                                    'only, no water) is matched up')
     p.add_argument('trajectory', nargs='?', help='trajectory file')
     p.add_argument('--waters', action='store_true',
                    help='also follow water-mediated contacts (needs the water in topology and trajectory)')

@@ -36,6 +36,17 @@ class Ensemble:
     waters: Optional[list] = None  # per frame: oxygen positions of the waters between the two sides
     log: List[str] = field(default_factory=list)     # what was decided while reading (chains found, box handling)
 
+    def __post_init__(self):
+        if 'resid' not in self.atoms:      # the name a residue is shown by; `resnum` is what the PDB frames carry
+            self.atoms = self.atoms.assign(resid=self.atoms.resnum.astype(str))
+        if 'kind' not in self.atoms:
+            self.atoms = self.atoms.assign(kind='protein')
+
+    @property
+    def labels(self) -> pd.Series:
+        """Every atom's residue as it is shown: 'TYR 100A', or 'TYR H:100A' when a side holds several chains."""
+        return self.atoms.resname + ' ' + self.atoms.resid
+
     @property
     def n_frames(self) -> int:
         return len(self.coords)
@@ -49,7 +60,7 @@ def _pdb_text(atoms: pd.DataFrame, xyz: np.ndarray, waters: Optional[np.ndarray]
     lines = []
     for i, (a, (x, y, z)) in enumerate(zip(atoms.itertuples(), xyz), 1):
         name = a.name if len(a.name) == 4 else f' {a.name:<3}'
-        lines.append(f'ATOM  {i % 100000:5d} {name} {a.resname:>3} {a.chain}{a.resnum:4d}    '
+        lines.append(f'ATOM  {i % 100000:5d} {name[:4]} {a.resname[:3]:>3} {a.chain}{a.resnum:4d}    '
                      f'{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00          {a.element:>2}')
     if waters is not None:   # interface waters ride along in the first chain, as PDB files carry them
         chain = atoms.chain.iloc[0]
@@ -79,6 +90,30 @@ def canonical(resname: str, name: str, ribose: bool = False):
     return resname, name
 
 
+def _number(atoms: pd.DataFrame) -> pd.DataFrame:
+    """Settle how residues are numbered. `resnum` is the number the PDB frames carry: it has to be unique within
+    a side and fit four digits, so a side with insertion codes (100, 100A), with chains whose numbers repeat, or
+    with numbers above 9999 is counted 1, 2, 3 ... instead. `resid` is what people read and never changes: the
+    original number with its insertion code, and the chain in front when a side holds several (H:100A)."""
+    atoms = atoms.copy()
+    icode = atoms.icode if 'icode' in atoms else pd.Series('', index=atoms.index)
+    part = atoms.part if 'part' in atoms else atoms.chain
+    atoms['resid'] = atoms.resnum.astype(str) + icode
+    for c in dict.fromkeys(atoms.chain):
+        side = (atoms.chain == c).values
+        key = pd.DataFrame({'p': part[side], 'n': atoms.resnum[side], 'i': icode[side]})
+        new = (key != key.shift()).any(axis=1).values            # first atom of every residue
+        if part[side].nunique() > 1:
+            atoms.loc[side, 'resid'] = part[side] + ':' + atoms.resid[side]
+        nums = atoms.resnum[side].values
+        if len(set(nums[new])) < new.sum() or nums.max() > 9999 or nums.min() < -999:
+            if new.sum() > 9999:
+                raise ValueError(f'Side {c} holds {new.sum()} residues; the PDB frames PandaPPI reads take 9999. '
+                                 'Choose a smaller part with --select')
+            atoms.loc[side, 'resnum'] = new.cumsum()
+    return atoms.drop(columns=[c for c in ('icode', 'part') if c in atoms])
+
+
 def read_pdb(path: str, chains: Optional[Sequence[str]] = None, all_models: bool = False):
     """Heavy polymer atoms of a PDB file.
 
@@ -106,14 +141,15 @@ def read_pdb(path: str, chains: Optional[Sequence[str]] = None, all_models: bool
                 continue
             if first:
                 resname, name = canonical(resname, name)
-                rows.append((chain, resname, int(line[22:26]), name, element))
+                rows.append((chain, resname, int(line[22:26]), name, element, line[26].strip()))
                 index.append(n)
             xyz.append((float(line[30:38]), float(line[38:46]), float(line[46:54])))
     if xyz:
         models.append(xyz)
-    atoms = pd.DataFrame(rows, columns=['chain', 'resname', 'resnum', 'name', 'element'])
+    atoms = pd.DataFrame(rows, columns=['chain', 'resname', 'resnum', 'name', 'element', 'icode'])
     if atoms.empty:
         raise ValueError(f'No polymer atoms found in {path}' + (f' for chains {list(chains)}' if chains else ''))
+    atoms = _number(atoms)
     if len({len(m) for m in models}) != 1:
         raise ValueError(f'{path}: models do not all contain the same atoms')
     return atoms, np.array(models, dtype=float), np.array(index)
@@ -138,6 +174,15 @@ def pick_chains(path: str, chains: Optional[Sequence[str]]) -> tuple:
             if n > best:
                 best, pair = n, (a, b)
     return pair
+
+
+def _plain_pdb(path: str) -> bool:
+    """A PDB file the built-in reader is enough for: protein chains only (nucleic acids go through MDAnalysis,
+    which sorts chains into protein and nucleic acid sides)."""
+    if not path.lower().endswith(('.pdb', '.ent')):
+        return False
+    with open(path, errors='replace') as f:
+        return not any(line.startswith('ATOM') and line[12:16].strip() in ("C4'", 'C4*') for line in f)
 
 
 def _superpose(coords: np.ndarray, sel: np.ndarray, extras: Optional[list] = None) -> np.ndarray:
@@ -192,19 +237,21 @@ def nma(pdb: str, chains: Optional[Sequence[str]] = None, mode: int = 1, rmsd: f
     `pdb` is a PDB file; with `select`, or for any other structure file, it is read through MDAnalysis.
     """
     log = []
-    if select or renumber or not pdb.lower().endswith(('.pdb', '.ent')):
+    if select or renumber or not (_plain_pdb(pdb) or (chains and pdb.lower().endswith(('.pdb', '.ent')))):
         u = _universe(pdb, None)
         atoms, index, (a, b), log = _sides(u, chains, select, renumber)
         xyz = u.atoms.positions[index].astype(float)
         box = u.trajectory.ts.dimensions
         if box is not None and box[:3].min() > 0:
-            xyz = _whole(xyz, (atoms.chain == b).values, u.trajectory.ts.triclinic_dimensions.astype(float))
+            xyz = _whole(xyz, atoms.unit.values, u.trajectory.ts.triclinic_dimensions.astype(float))
     else:
         a, b = pick_chains(pdb, chains)
         atoms, coords, _ = read_pdb(pdb, (a, b))
         xyz = coords[0]
     res_key = atoms.chain + atoms.resnum.astype(str)
     is_node = atoms.name.isin(['CA', "C4'"]).values
+    if 'kind' in atoms:   # a ligand, ion or sugar has no backbone: its first atom is its node
+        is_node |= ((atoms.kind == 'other') & ~res_key.duplicated()).values
     node_of = dict(zip(res_key[is_node], range(is_node.sum())))
     missing = ~res_key.isin(node_of)
     if missing.any():  # residues without a node atom (truncated residues) cannot be moved
@@ -260,11 +307,292 @@ def _is_gromacs_top(path: str) -> bool:
         return not f.read(200).lstrip().startswith('%')
 
 
-def _open(mda, top, traj):
-    if not _is_gromacs_top(top):
-        return mda.Universe(top, traj) if traj else mda.Universe(top)
+IONS = {'NA', 'CL', 'K', 'MG', 'CA', 'ZN', 'LI', 'RB', 'CS', 'NA+', 'CL-', 'K+', 'SOD', 'CLA', 'POT', 'CAL', 'MN',
+        'FE', 'CU', 'NI', 'CO', 'CD', 'BR', 'I', 'F'}
+WATER_SITES = {3: ('OW', 'HW1', 'HW2'), 4: ('OW', 'HW1', 'HW2', 'MW'), 5: ('OW', 'HW1', 'HW2', 'LP1', 'LP2')}
+
+
+def _gromacs_top(path: str, n_atoms: Optional[int] = None):
+    """Atoms of a GROMACS .top, in the order of the system: (names, resnames, resnums, molecule of each atom, note).
+
+    Reads the [ moleculetype ], [ atoms ] and [ molecules ] sections and follows #include, #ifdef and #define.
+    Residue numbers are those of each molecule (GROMACS itself counts on through the system). A molecule defined
+    in a force field file that is not at hand (water, ions: no GROMACS on this machine) is filled in when it can
+    be nothing else: ions hold one atom, and the water model is the one that makes the trajectory's `n_atoms`.
+    """
+    import os
     include = _gromacs_include_dir()
-    return mda.Universe(top, traj, topology_format='ITP', **({'include_dir': include} if include else {}))
+    types, order, missing = {}, [], []
+    state = {'section': '', 'mol': None}
+
+    def read(file, defined, depth=0):
+        folder = os.path.dirname(os.path.abspath(file))
+        active = [True]
+        with open(file, errors='replace') as f:
+            lines = f.read().replace('\\\n', ' ').splitlines()
+        for line in lines:
+            line = line.split(';')[0].strip()
+            if not line:
+                continue
+            if line.startswith('#'):
+                word, _, rest = line[1:].strip().partition(' ')
+                rest = rest.strip()
+                if word in ('ifdef', 'ifndef'):
+                    active.append(active[-1] and ((rest.split()[0] in defined) == (word == 'ifdef')))
+                elif word == 'else':
+                    active[-1] = not active[-1] and all(active[:-1])
+                elif word == 'endif':
+                    active.pop()
+                elif not active[-1]:
+                    pass
+                elif word == 'define' and rest:
+                    defined.add(rest.split()[0])
+                elif word == 'include' and depth < 20:
+                    name = rest.strip('"<>')
+                    for base in (folder, os.path.dirname(os.path.abspath(path)), include):
+                        if base and os.path.isfile(os.path.join(base, name)):
+                            read(os.path.join(base, name), defined, depth + 1)
+                            break
+                    else:
+                        missing.append(name)
+                continue
+            if not active[-1]:
+                continue
+            if line.startswith('['):
+                state['section'] = line.strip('[] ').lower()
+                continue
+            cols = line.split()
+            if state['section'] == 'moleculetype':
+                state['mol'] = cols[0]
+                types[cols[0]] = []
+            elif state['section'] == 'atoms' and state['mol'] and len(cols) >= 5:
+                types[state['mol']].append((cols[4], cols[3], int(cols[2])))      # atom, residue, residue number
+            elif state['section'] == 'molecules' and len(cols) >= 2:
+                order.append((cols[0], int(cols[1])))
+
+    read(path, set())
+    if not order:
+        raise ValueError('no [ molecules ] section')
+    unknown = [m for m, _ in order if m not in types]
+    note = ''
+    if unknown:
+        waters = sum(n for m, n in order if m not in types and m.upper() in WATER)
+        for m in set(unknown):
+            if m.upper() in IONS:
+                types[m] = [(m, m, 1)]
+            elif m.upper() not in WATER:
+                raise ValueError(f'molecule {m} is defined in a file that was not found ({", ".join(missing)})')
+        if waters:
+            known = sum(len(types[m]) * n for m, n in order if m in types)
+            sites = (n_atoms - known) / waters if n_atoms else 3
+            if n_atoms and n_atoms <= known:      # a trajectory saved without its water: the model does not matter
+                sites = 3
+            if sites not in WATER_SITES:
+                raise ValueError(f'cannot tell the water model: the force field files ({", ".join(missing)}) '
+                                 'were not found and the atom count does not settle it')
+            for m in set(unknown):
+                if m.upper() in WATER:
+                    types[m] = [(name, 'SOL', 1) for name in WATER_SITES[int(sites)]]
+        note = (f'{os.path.basename(path)}: force field files not found ({", ".join(dict.fromkeys(missing))}); '
+                'water and ions were filled in from their names')
+    names, resnames, resnums, mol = [], [], [], []
+    k = 0
+    for m, n in order:
+        atoms = types[m]
+        for _ in range(n):
+            names += [a[0] for a in atoms]
+            resnames += [a[1] for a in atoms]
+            resnums += [a[2] for a in atoms]
+            mol += [k] * len(atoms)
+            k += 1
+    return names, resnames, np.array(resnums), np.array(mol), [m for m, n in order for _ in range(n)], note
+
+
+def _empty(mda, names, resnames, resnums, groups, segids=None, chain_ids=None, icodes=None):
+    """A Universe from plain per-atom arrays; a new residue starts where `groups` or the residue number changes."""
+    resnums, groups = np.asarray(resnums), np.asarray(groups)
+    start = np.r_[True, (resnums[1:] != resnums[:-1]) | (groups[1:] != groups[:-1])]
+    resindex = np.cumsum(start) - 1
+    first = np.where(start)[0]
+    seg_of_res = groups[first]
+    seg_start = np.r_[True, seg_of_res[1:] != seg_of_res[:-1]]
+    u = mda.Universe.empty(len(names), n_residues=len(first), n_segments=int(seg_start.sum()),
+                           atom_resindex=resindex, residue_segindex=np.cumsum(seg_start) - 1, trajectory=False)
+    u.add_TopologyAttr('names', list(names))
+    u.add_TopologyAttr('resnames', [resnames[i] for i in first])
+    u.add_TopologyAttr('resids', resnums[first])
+    if segids is not None:
+        u.add_TopologyAttr('segids', [segids[i] for i in first[seg_start]])
+    if chain_ids is not None:
+        u.add_TopologyAttr('chainIDs', list(chain_ids))
+    if icodes is not None:
+        u.add_TopologyAttr('icodes', [icodes[i] for i in first])
+    return u
+
+
+def _n_atoms(mda, traj: str) -> int:
+    from MDAnalysis.coordinates.core import reader
+    r = reader(traj)
+    try:
+        return r.n_atoms
+    finally:
+        r.close()
+
+
+def _topology(mda, top: str, n_traj: Optional[int]):
+    """The Universe of a topology file, without the trajectory, and what had to be said about reading it."""
+    import os
+    notes = []
+    if _is_gromacs_top(top):
+        try:
+            names, resnames, resnums, mol, molname, note = _gromacs_top(top, n_traj)
+            notes += [note] if note else []
+            segids = np.array(molname)[mol]
+            return _empty(mda, names, resnames, resnums, mol, segids=segids), notes
+        except (ValueError, IndexError, OSError) as own:     # an unusual .top: let MDAnalysis try
+            include = _gromacs_include_dir()
+            try:
+                return mda.Universe(top, topology_format='ITP', **({'include_dir': include} if include else {})), notes
+            except Exception:
+                raise ValueError(f'{own}. A GROMACS .top includes force field files from the GROMACS '
+                                 'installation: load GROMACS first (gmx on the PATH, or GMXDATA set), keep the '
+                                 '.itp files it includes next to it, or give the .gro or .tpr instead') from own
+    try:
+        return mda.Universe(top), notes
+    except Exception as e:
+        if 'tpx version' not in str(e):
+            raise
+        # MDAnalysis lags behind new GROMACS releases. The .gro mdrun writes next to the .tpr holds the same
+        # atoms and never changes format, and so does the .top the .tpr was made from
+        name, stem, folder = os.path.basename(top), os.path.splitext(top)[0], os.path.dirname(top)
+        for other in (stem + '.gro', stem + '.top', os.path.join(folder, 'topol.top')):
+            if os.path.exists(other):
+                try:
+                    u, more = _topology(mda, other, n_traj)
+                except Exception:
+                    continue
+                return u, [f'{name} is from a GROMACS newer than the installed MDAnalysis reads: used '
+                           f'{os.path.basename(other)} next to it instead'] + more
+        raise ValueError(f'{e}. This .tpr is from a GROMACS newer than the installed MDAnalysis reads. Give the '
+                         f'.gro or the .top of the same system instead (gmx editconf -f {name} -o system.gro '
+                         'writes a .gro), or try pip install -U MDAnalysis') from e
+
+
+def _original_numbers(mda, u, top: str, notes: list):
+    """Residue numbers as the structure had them, where the topology format dropped them.
+
+    A .tpr counts residues 1, 2, 3 ... through the whole system: the .gro of the same run next to it still has
+    the numbers of each chain. An Amber prmtop does the same unless it carries the original numbers and chain
+    IDs (written by parmed's addPDB, or tleap from a PDB), which MDAnalysis does not read."""
+    import os
+    low = top.lower()
+    if low.endswith('.tpr'):
+        gro = os.path.splitext(top)[0] + '.gro'
+        if os.path.exists(gro):
+            try:
+                g = mda.Universe(gro)
+                if len(g.atoms) == len(u.atoms) and len(g.residues) == len(u.residues):
+                    u.residues.resids = g.residues.resids
+                    notes.append(f'Residue numbers taken from {os.path.basename(gro)} (a .tpr counts straight '
+                                 'through all chains)')
+            except Exception:
+                pass
+    elif low.endswith(('.prmtop', '.parm7', '.top')) and not _is_gromacs_top(top):
+        flags, flag = {}, None
+        with open(top, errors='replace') as f:
+            for line in f:
+                if line.startswith('%FLAG'):
+                    flag = line.split()[1]
+                    flag = flag if flag in ('RESIDUE_NUMBER', 'RESIDUE_CHAINID', 'RESIDUE_ICODE') else None
+                    if flag:
+                        flags[flag] = []
+                elif flag and line.startswith('%FORMAT'):
+                    import re
+                    flags[flag].append(int(re.search(r'\d+[aAiI](\d+)', line).group(1)))
+                elif flag:
+                    w = flags[flag][0]
+                    row = line.rstrip('\n')
+                    flags[flag] += [row[i:i + w] for i in range(0, len(row), w)]
+        n = len(u.residues)
+        got = {k: [x.strip() for x in v[1:]] for k, v in flags.items() if len(v) - 1 == n}
+        if 'RESIDUE_NUMBER' in got:
+            u.residues.resids = np.array(got['RESIDUE_NUMBER'], dtype=int)
+            notes.append('Residue numbers taken from the RESIDUE_NUMBER section of the prmtop')
+        if 'RESIDUE_CHAINID' in got and len(set(got['RESIDUE_CHAINID']) - {''}) >= 2:
+            u.add_TopologyAttr('chainIDs', np.array(got['RESIDUE_CHAINID'])[u.atoms.resindices])
+        if 'RESIDUE_ICODE' in got and any(got['RESIDUE_ICODE']):
+            u.add_TopologyAttr('icodes', got['RESIDUE_ICODE'])
+
+
+def _groups(u) -> list:
+    """Sets of atoms a trajectory is commonly saved for, smallest first: (description, atom indices)."""
+    names, resnames = _attr(u.atoms, 'names'), np.char.upper(_attr(u.atoms, 'resnames'))
+    resix = u.atoms.resindices
+    has = lambda *wanted: (np.bincount(resix[np.isin(names, wanted)], minlength=resix.max() + 1) > 0)[resix]
+    protein, nucleic = has('N') & has('CA'), has("C4'", 'C4*')
+    water, ion = np.isin(resnames, list(WATER)), np.isin(resnames, list(IONS))
+    hydrogen = np.array([n.lstrip('0123456789')[:1] == 'H' for n in names])
+    out = [('protein', protein), ('protein and nucleic acid', protein | nucleic),
+           ('everything but water and ions', ~water & ~ion), ('everything but water', ~water),
+           ('protein without hydrogens', protein & ~hydrogen),
+           ('protein and nucleic acid without hydrogens', (protein | nucleic) & ~hydrogen),
+           ('the backbone', protein & np.isin(names, ['N', 'CA', 'C', 'O'])),
+           ('the Cα atoms', protein & (names == 'CA'))]
+    return [(what, np.where(mask)[0]) for what, mask in out]
+
+
+def _fits(u) -> bool:
+    """Do the coordinates fit the topology? Bonded backbone atoms (N-CA, C4'-C3') sit about 1.5 Å apart."""
+    names, resix = _attr(u.atoms, 'names'), u.atoms.resindices
+    xyz = u.atoms.positions
+    for one, two in (('N', 'CA'), ("C4'", "C3'"), ('C4*', 'C3*')):
+        i, j = np.where(names == one)[0], np.where(names == two)[0]
+        both = np.intersect1d(resix[i], resix[j])
+        if len(both) >= 3:
+            i, j = i[np.isin(resix[i], both)][:300], j[np.isin(resix[j], both)][:300]
+            if len(i) == len(j):
+                return bool(1.2 < np.median(np.linalg.norm(xyz[i] - xyz[j], axis=1)) < 1.8)
+    return True   # no backbone to judge by
+
+
+def _reconcile(mda, u, traj: str, n_traj: int, notes: list):
+    """Topology and trajectory with different atom counts: the trajectory was saved for part of the system
+    (gmx trjconv/mdrun with an output group, cpptraj strip), or the topology was written for part of it."""
+    import os
+    n_top = len(u.atoms)
+    tname = os.path.basename(traj)
+    if n_traj < n_top:
+        for what, idx in _groups(u):
+            if len(idx) != n_traj:
+                continue
+            sub = mda.Merge(u.atoms[idx])
+            sub.load_new(traj)
+            if _fits(sub):
+                notes.append(f'{tname} holds {n_traj} atoms, the topology {n_top}: the trajectory was taken to '
+                             f'be {what} of the topology')
+                return sub
+        raise ValueError(f'the trajectory holds {n_traj} atoms and the topology {n_top}, and no usual part of '
+                         'the topology (protein, protein and nucleic acid, everything but water) has that many. '
+                         'Write the topology for the atoms the trajectory was saved for')
+    # more atoms in the trajectory: the topology is taken to describe its first atoms (solute first, as MD
+    # programs order a system)
+    a = u.atoms
+    chain_ids, icodes = _attr(a, 'chainIDs'), _attr(u.residues, 'icodes')
+    pad = n_traj - n_top
+    big = _empty(mda, list(a.names) + ['X'] * pad, list(a.resnames) + ['PAD'] * pad,
+                 np.r_[a.resids, np.zeros(pad, int)], np.r_[a.segindices, np.full(pad, a.segindices.max() + 1)],
+                 segids=np.r_[_attr(a, 'segids') if _attr(a, 'segids') is not None else np.full(n_top, ''),
+                              np.full(pad, 'PAD')],
+                 chain_ids=None if chain_ids is None else np.r_[chain_ids, np.full(pad, '')],
+                 icodes=None if icodes is None else np.r_[icodes[a.resindices], np.full(pad, '')])
+    big.load_new(traj)
+    if not _fits(big):
+        raise ValueError(f'the trajectory holds {n_traj} atoms and the topology {n_top}, and the topology does '
+                         'not describe the first atoms of the trajectory. Write the topology for the same atoms '
+                         'as the trajectory')
+    notes.append(f'{tname} holds {n_traj} atoms, the topology {n_top}: the topology was taken to describe the '
+                 f'first {n_top} atoms of the trajectory (waters cannot be followed this way)')
+    return big
 
 
 def _universe(top: str, traj: Optional[str]):
@@ -283,45 +611,28 @@ def _universe(top: str, traj: Optional[str]):
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')  # MDAnalysis is chatty about PDB records and future changes
         try:
-            return _open(mda, top, traj)
+            n_traj = _n_atoms(mda, traj) if traj else None
+            u, notes = _topology(mda, top, n_traj)
+            _original_numbers(mda, u, top, notes)
+            if traj and n_traj != len(u.atoms):
+                u = _reconcile(mda, u, traj, n_traj, notes)
+            elif traj:
+                u.load_new(traj)
         except Exception as e:
-            hint = ''
-            name = os.path.basename(top)
-            if _is_gromacs_top(top) and isinstance(e, (OSError, KeyError)):
-                hint = (' A GROMACS .top includes force field files from the GROMACS installation: load GROMACS '
-                        'first (so that gmx is on the PATH, or GMXDATA is set), keep the .itp files it includes '
-                        'next to it, or give the .gro or .tpr of the same system instead.')
-            elif 'tpx version' in str(e):
-                # MDAnalysis lags behind new GROMACS releases. The .gro mdrun writes next to the .tpr holds the
-                # same atoms and never changes format, and so does the .top the .tpr was made from
-                stem, folder = os.path.splitext(top)[0], os.path.dirname(top)
-                for other in (stem + '.gro', stem + '.top', os.path.join(folder, 'topol.top')):
-                    if not os.path.exists(other) or (other.endswith('.top') and not traj):
-                        continue
-                    try:
-                        u = _open(mda, other, traj)
-                    except Exception:
-                        continue
-                    u._ppitango_note = (f'{name} is from a GROMACS newer than the installed MDAnalysis reads: '
-                                        f'used {os.path.basename(other)} next to it instead')
-                    return u
-                hint = (' This .tpr is from a GROMACS newer than the installed MDAnalysis reads. Give the .gro or '
-                        f'the .top of the same system instead (gmx editconf -f {name} -o system.gro writes a '
-                        '.gro), or try pip install -U MDAnalysis.')
-            elif 'atoms' in str(e).lower() or 'natoms' in str(e).lower():
-                hint = (' The topology and the trajectory must hold the same atoms in the same order: if the '
-                        'trajectory was saved for a subset (protein only), write the topology for that subset too.')
             raise ValueError(f'Could not read {top}' + (f' with {traj}' if traj else '') +
-                             f': {type(e).__name__}: {e}.{hint}') from e
+                             f': {str(e).rstrip(".")}.') from e
+    u._ppitango_notes = notes
+    return u
 
 
-def _polymer(u, renumber: Optional[dict] = None):
+def _polymer(u, renumber: Optional[dict] = None, extra=None):
     """Heavy atoms of protein and nucleic acid residues, with a chain label for every atom.
 
     Returns (atoms, index, table): `atoms` has one row per kept atom (chain, segid, resname, resnum, name,
     element), `index` is each row's position in the trajectory's atom order and `table` describes the chains.
     Residues count as polymer when they have a backbone (N and CA, or a sugar C4'), whatever they are called,
-    so force-field names (HIE, CYX, ...) and modified residues stay and water, ions, lipids and ligands go.
+    so force-field names (HIE, CYX, ...) and modified residues stay and water, ions, lipids and ligands go,
+    unless their atoms are listed in `extra` (a ligand, ion or sugar named in a selection).
     """
     ag = u.atoms
     names = _attr(ag, 'names')
@@ -333,16 +644,22 @@ def _polymer(u, renumber: Optional[dict] = None):
     elements = _attr(ag, 'elements')
     bare = np.array([n.lstrip('0123456789') for n in names])
     first = np.array([n[:1] for n in bare])
-    if elements is None:
-        elements = first
-    else:
-        # an element the atom name does not start with was guessed from a force-field atom type (a GROMACS .top
-        # calls a histidine nitrogen NA, which reads as sodium): the name is the better guide in a polymer
-        agrees = np.array([bool(e) and n.upper().startswith(e.upper()) for e, n in zip(elements, bare)])
-        elements = np.where(agrees | (np.char.upper(elements) == 'D'), elements, first)
+    # an element the atom name does not start with was guessed from a force-field atom type (a GROMACS .top
+    # calls a histidine nitrogen NA, which reads as sodium): the name is the better guide
+    given = elements if elements is not None else np.full(len(names), '')
+    agrees = np.array([bool(e) and n.upper().startswith(e.upper()) for e, n in zip(given, bare)])
+    elements = np.where(agrees | (np.char.upper(given) == 'D'), given, first)
+    other = np.zeros(len(names), bool)
+    if extra is not None and len(extra):
+        other[extra] = True
+        other &= ~(protein | nucleic)[resix]
+        # outside a polymer the first letter is not enough: a lone atom is an ion (NA, ZN, MG), CL and BR halogens
+        letters = np.array([''.join(ch for ch in n if ch.isalpha())[:2].upper() for n in names])
+        lone = np.bincount(resix, minlength=n_res)[resix] == 1
+        elements = np.where(other & ~agrees & (lone | np.isin(letters, ('CL', 'BR'))), letters, elements)
     hydrogen = np.isin(np.char.upper(elements), ('H', 'D'))
     altloc = _attr(ag, 'altLocs')
-    keep = (protein | nucleic)[resix] & ~hydrogen
+    keep = ((protein | nucleic)[resix] | other) & ~hydrogen
     if altloc is not None:
         keep &= np.isin(altloc, ('', 'A'))
     index = np.where(keep)[0]
@@ -350,13 +667,17 @@ def _polymer(u, renumber: Optional[dict] = None):
         raise ValueError('No protein or nucleic acid found in the topology')
 
     ribose = has("O2'", 'O2*')[resix[index]]
-    pairs = [canonical(r, n, rib) for r, n, rib in zip(_attr(ag, 'resnames')[index], names[index], ribose)]
+    kind = np.where(protein[resix[index]], 'protein', np.where(nucleic[resix[index]], 'nucleic', 'other'))
+    pairs = [canonical(r, n, rib) if k != 'other' else (r, n)
+             for r, n, rib, k in zip(_attr(ag, 'resnames')[index], names[index], ribose, kind)]
     resname, name = np.array([q[0] for q in pairs]), np.array([q[1] for q in pairs])
     resnum = ag.resids[index]
     segid = _attr(ag, 'segids')
     segid = segid[index] if segid is not None else np.full(len(index), '')
     chain_id = _attr(ag, 'chainIDs')
     chain_id = chain_id[index] if chain_id is not None else np.full(len(index), '')
+    icode = _attr(u.residues, 'icodes')
+    icode = icode[resix[index]] if icode is not None else np.full(len(index), '')
 
     if len(set(chain_id) - {'', 'X', 'SYSTEM'}) >= 2 and (chain_id != '').all():
         chain, how = chain_id, 'chain IDs of the topology'
@@ -376,7 +697,8 @@ def _polymer(u, renumber: Optional[dict] = None):
         label, k = {}, 0
         for prev, cur, s in zip(res_ids[:-1], res_ids[1:], starts[1:]):
             label[prev] = k
-            new = segid[s] != segid[s - 1] or resnum[s] < resnum[s - 1] or protein[cur] != protein[prev]
+            new = segid[s] != segid[s - 1] or resnum[s] < resnum[s - 1] or kind[s] != kind[s - 1] \
+                or kind[s] == 'other'
             if not new and prev in tail and cur in head:
                 gap = calc_bonds(xyz[tail[prev]][None], xyz[head[cur]][None],
                                  box=box if box is not None and box[:3].min() > 0 else None)[0]
@@ -389,7 +711,7 @@ def _polymer(u, renumber: Optional[dict] = None):
         how = 'no chain IDs in the topology: chains lettered in file order, split where the backbone breaks'
 
     atoms = pd.DataFrame({'chain': chain, 'segid': segid, 'resname': resname, 'resnum': resnum, 'name': name,
-                          'element': np.char.upper(elements[index])})
+                          'element': np.char.upper(elements[index]), 'kind': kind, 'icode': icode})
     for c, first in (renumber or {}).items():   # tpr and prmtop files count residues 1, 2, 3 ... through all chains
         if c not in set(chain):
             raise ValueError(f'--renumber: no chain {c}. Chains: {", ".join(dict.fromkeys(chain))}')
@@ -398,9 +720,11 @@ def _polymer(u, renumber: Optional[dict] = None):
     rows = []
     for c, g in atoms.groupby('chain', sort=False):
         first, last = g.iloc[0], g.iloc[-1]
-        n = g[['segid', 'resnum']].drop_duplicates().shape[0]
+        n = g[['segid', 'resnum', 'icode']].drop_duplicates().shape[0]
         seg = f', segment {first.segid}' if first.segid and first.segid != 'SYSTEM' else ''
-        rows.append(f'  {c}: {n} residues, {first.resname}{first.resnum} to {last.resname}{last.resnum}{seg}')
+        what = {'protein': 'residues', 'nucleic': 'nucleotides'}.get(first.kind, 'other residues')
+        rows.append(f'  {c}: {n} {what}, {first.resname}{first.resnum}{first.icode} to '
+                    f'{last.resname}{last.resnum}{last.icode}{seg}')
     return atoms, index, f'Chains ({how}):\n' + '\n'.join(rows)
 
 
@@ -424,30 +748,45 @@ def _closest_pair(atoms: pd.DataFrame, xyz: np.ndarray, box) -> tuple:
 
 def _sides(u, chains, select, renumber=None):
     """Which atoms make up side a and side b. Returns (atoms, index, (a, b), log)."""
-    atoms, index, table = _polymer(u, renumber)
-    log = [u._ppitango_note] if hasattr(u, '_ppitango_note') else []
+    log = list(getattr(u, '_ppitango_notes', []))
+    chosen = []
     if select:
         if len(select) != 2:
             raise ValueError('Give exactly two selections, e.g. --select "resid 1-110" "resid 111-199"')
-        pos = {j: i for i, j in enumerate(index)}
-        picked = []
-        for label, text in zip('AB', select):
+        for text in select:
             try:
-                found = u.select_atoms(text).indices
+                chosen.append(u.select_atoms(text).indices)
             except Exception as e:
                 raise ValueError(f'Selection "{text}" not understood: {e}') from e
-            rows = [pos[j] for j in found if j in pos]
+    # a selection that names no protein or nucleic acid at all is a ligand, a sugar, a lipid or ions: its heavy
+    # atoms are followed as they are. Otherwise only the polymer in a selection counts, so "chainID A" does not
+    # drag the waters and buffer molecules of chain A along.
+    names, resix = _attr(u.atoms, 'names'), u.atoms.resindices
+    backbone = np.isin(resix, resix[np.isin(names, ['CA', "C4'", 'C4*'])])
+    extra = [found for found in chosen if len(found) and not backbone[found].any()]
+    atoms, index, table = _polymer(u, renumber, extra=np.concatenate(extra) if extra else None)
+    picked = None
+    if select:
+        pos = {j: i for i, j in enumerate(index)}
+        polymer = (atoms.kind != 'other').values
+        picked = [[pos[j] for j in found if j in pos and (polymer[pos[j]] or not backbone[found].any())]
+                  for found in chosen]
+        for rows, text in zip(picked, select):
             if not rows:
-                raise ValueError(f'Selection "{text}" holds no protein or nucleic acid atoms.\n{table}')
-            picked.append(rows)
+                raise ValueError(f'Selection "{text}" holds no atoms to follow (hydrogens are left out).\n{table}')
         if set(picked[0]) & set(picked[1]):
             raise ValueError('The two selections overlap')
+        log.append(f'Side A = "{select[0]}", side B = "{select[1]}"')
+    elif not chains and {'protein', 'nucleic'} <= set(atoms.kind):
+        picked = [np.where(atoms.kind == k)[0].tolist() for k in ('protein', 'nucleic')]
+        log += [table, 'Protein with nucleic acid: side A is all protein chains, side B all nucleic acid chains '
+                       '(choose others with --chains or --select)']
+    if picked:
         rows = picked[0] + picked[1]
         atoms, index = atoms.iloc[rows].reset_index(drop=True), index[rows]
         atoms['part'] = atoms.chain          # the chain each atom came from: a side may hold several
         atoms['chain'] = ['A'] * len(picked[0]) + ['B'] * len(picked[1])
         a, b = 'A', 'B'
-        log.append(f'Side A = "{select[0]}", side B = "{select[1]}"')
     else:
         present = list(dict.fromkeys(atoms.chain))
         if chains:
@@ -466,48 +805,40 @@ def _sides(u, chains, select, renumber=None):
             log.append(table)
         rows = np.r_[np.where(atoms.chain == a)[0], np.where(atoms.chain == b)[0]]
         atoms, index = atoms.iloc[rows].reset_index(drop=True), index[rows]
-    if 'part' in atoms:
-        # a side made of several chains (antibody heavy + light, both DNA strands): PandaPPI knows a residue by
-        # side and number, so chains whose numbers repeat are shifted by whole thousands, and the shift is said
-        for c in (a, b):
-            side = atoms.chain == c
-            parts = list(dict.fromkeys(atoms.part[side]))
-            spans = [set(atoms.resnum[side & (atoms.part == q)]) for q in parts]
-            if len(parts) > 1 and sum(map(len, spans)) > len(set().union(*spans)):
-                top_, shifts = max(spans[0]), []
-                for q, span in zip(parts[1:], spans[1:]):
-                    shift = (top_ // 1000 + 1) * 1000 - (min(span) // 1000) * 1000
-                    atoms.loc[side & (atoms.part == q), 'resnum'] += shift
-                    top_ = max(span) + shift
-                    shifts.append(f'{q} +{shift}')
-                log.append(f'Side {c} holds {len(parts)} chains with repeating residue numbers: numbers shifted '
-                           f'for chain {", ".join(shifts)}')
-        atoms = atoms.drop(columns='part')
-    if atoms.resnum.max() > 9999 or atoms.resnum.min() < -999:
-        raise ValueError('Residue numbers outside -999..9999 cannot be written to the PDB frames PandaPPI reads; '
-                         'renumber the topology')
+    atoms['unit'] = pd.factorize(atoms.part if 'part' in atoms else atoms.chain)[0]   # chains, for unwrapping
+    atoms = _number(atoms)
+    for c in (a, b):
+        side = (atoms.chain == c).values
+        if (atoms.resid[side].str.contains(':')).any():
+            log.append(f'Side {c} holds several chains: its residues are named chain:number '
+                       f'({atoms.resid[side].iloc[0]} ... {atoms.resid[side].iloc[-1]})')
     return atoms.drop(columns='segid'), index, (a, b), log
 
 
-def _whole(xyz: np.ndarray, b_sel: np.ndarray, box: np.ndarray) -> np.ndarray:
-    """Undo periodic wrapping: make each side whole, then put side b at the image closest to side a."""
+def _whole(xyz: np.ndarray, unit: np.ndarray, box: np.ndarray) -> np.ndarray:
+    """Undo periodic wrapping. `unit` numbers the chains, side a's first: each chain is made whole, then put at
+    the periodic image closest to the chains before it."""
     inv = np.linalg.inv(box)
-    for sel in (~b_sel, b_sel):
+    placed = None
+    for k in dict.fromkeys(unit):
+        sel = unit == k
         part = xyz[sel]
         # consecutive atoms of a chain are a few Å apart, so any jump of about a box length is a wrap
         part[1:] -= np.cumsum(np.round(np.diff(part, axis=0) @ inv), axis=0) @ box
+        if placed is not None:
+            ref, own = placed[::4], part[::4]
+            base = np.round((own.mean(0) - ref.mean(0)) @ inv)
+            best, shift = np.inf, base
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for dz in (-1, 0, 1):
+                        s = base + (dx, dy, dz)
+                        d = ((ref[:, None] - (own - s @ box)[None]) ** 2).sum(-1).min()
+                        if d < best:
+                            best, shift = d, s
+            part -= shift @ box
         xyz[sel] = part
-    a, b = xyz[~b_sel][::4], xyz[b_sel][::4]
-    base = np.round((b.mean(0) - a.mean(0)) @ inv)
-    best, shift = np.inf, base
-    for dx in (-1, 0, 1):
-        for dy in (-1, 0, 1):
-            for dz in (-1, 0, 1):
-                s = base + (dx, dy, dz)
-                d = ((a[:, None] - (b - s @ box)[None]) ** 2).sum(-1).min()
-                if d < best:
-                    best, shift = d, s
-    xyz[b_sel] -= shift @ box
+        placed = part if placed is None else np.concatenate([placed, part])
     return xyz
 
 
@@ -543,7 +874,8 @@ def _read_trajectory(top: str, traj: Optional[str], chains, stride: int = 1, max
     Returns (atoms, coords, (a, b), times, log, waters); `times` is in ps when the trajectory stores them, else
     None; `waters` is a list of oxygen positions per frame when asked for, else None.
     """
-    if traj is None and top.lower().endswith(('.pdb', '.ent')) and not (select or renumber or waters):
+    if traj is None and not (select or renumber or waters) and \
+            (_plain_pdb(top) or (chains and top.lower().endswith(('.pdb', '.ent')))):
         a, b = pick_chains(top, chains)
         atoms, coords, _ = read_pdb(top, (a, b), all_models=True)
         keep = np.arange(len(coords))[::stride]
@@ -565,7 +897,7 @@ def _read_trajectory(top: str, traj: Optional[str], chains, stride: int = 1, max
     keep = np.arange(len(u.trajectory))[::stride]
     if max_frames and len(keep) > max_frames:   # choose the frames first: long trajectories are never read whole
         keep = keep[np.linspace(0, len(keep) - 1, max_frames).round().astype(int)]
-    b_sel = (atoms.chain == b).values
+    b_sel, unit = (atoms.chain == b).values, atoms.unit.values
     frames, times, unwrapped = [], [], False
     for i in keep:
         ts = u.trajectory[i]
@@ -574,7 +906,7 @@ def _read_trajectory(top: str, traj: Optional[str], chains, stride: int = 1, max
         if ts.dimensions is not None and ts.dimensions[:3].min() > 0:
             before = xyz.copy()
             box = ts.triclinic_dimensions.astype(float)
-            xyz = _whole(xyz, b_sel, box)
+            xyz = _whole(xyz, unit, box)
             unwrapped |= bool(np.abs(xyz - before).max() > 1)
         frames.append(xyz)
         if waters:

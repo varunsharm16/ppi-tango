@@ -43,6 +43,8 @@ for i, frame in enumerate(job['frames']):
             obj += [cgo.CYLINDER, x1 + (x2 - x1) * u, y1 + (y2 - y1) * u, z1 + (z2 - z1) * u,
                     x1 + (x2 - x1) * v, y1 + (y2 - y1) * v, z1 + (z2 - z1) * v, RADIUS, r, g, bl, r, g, bl]
             t += DASH + GAP
+    for x, y, z in frame.get('waters', ()):          # bridging waters: red spheres
+        obj += [cgo.COLOR, 0.90, 0.29, 0.21, cgo.SPHERE, x, y, z, 0.45]
     if obj:
         cmd.load_cgo(obj, 'contacts', state=i + 1)
 

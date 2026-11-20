@@ -14,32 +14,99 @@ from .ensembles import Ensemble
 
 SKIP = ('Van der Waals',)   # atom-level contacts are counted, not drawn
 BASIC = {'ARG': ('NH1', 'NH2', 'NE'), 'LYS': ('NZ',), 'HIS': ('ND1', 'NE2')}
-PHOSPHATE = ('OP1', 'OP2')
+CATION = {'ARG': 'CZ', 'LYS': 'NZ'}
+SIX, FIVE = ('N1', 'C2', 'N3', 'C4', 'C5', 'C6'), ('C4', 'C5', 'N7', 'C8', 'N9')
+RINGS = {'PHE': [('CG', 'CD1', 'CD2', 'CE1', 'CE2', 'CZ')], 'TYR': [('CG', 'CD1', 'CD2', 'CE1', 'CE2', 'CZ')],
+         'TRP': [('CD2', 'CE2', 'CE3', 'CZ2', 'CZ3', 'CH2'), ('CG', 'CD1', 'NE1', 'CE2', 'CD2')],
+         'HIS': [('CG', 'ND1', 'CD2', 'CE1', 'NE2')],
+         **{r: [SIX, FIVE] for r in ('DA', 'DG', 'A', 'G')}, **{r: [SIX] for r in ('DC', 'DT', 'DU', 'C', 'U')}}
+BASES = ('DA', 'DG', 'DC', 'DT', 'DU', 'A', 'G', 'C', 'U')
+AMINO = {'ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU', 'GLY', 'HIS', 'ILE', 'LEU', 'LYS', 'MET', 'PHE', 'PRO',
+         'SER', 'THR', 'TRP', 'TYR', 'VAL'}
+GREASY = {'ALA', 'VAL', 'LEU', 'ILE', 'MET', 'PHE', 'TRP', 'PRO', 'TYR', 'CYS'}
+METALS = {'NA', 'K', 'LI', 'RB', 'CS', 'MG', 'CA', 'ZN', 'MN', 'FE', 'CU', 'NI', 'CO', 'CD', 'SR', 'BA', 'HG'}
+HALIDES = {'F', 'CL', 'BR', 'I'}
 
 
-def _phosphate_bridges(pdb_text: str, a: str, b: str, cutoff: float = 4.0):
-    """Salt bridges between basic side chains and backbone phosphates (PandaPPI pairs amino acids only)."""
-    basic, phos = [], []
+def _extra_contacts(pdb_text: str, a: str, b: str):
+    """Contacts PandaPPI does not look for, since it pairs amino acids with amino acids. With its cutoffs:
+
+    - salt bridges from Arg, Lys, His to backbone phosphates (4.0 Å)
+    - stacking of an aromatic side chain on a base: ring centres within 7.0 Å, planes parallel or at a right
+      angle (within 30°)
+    - cation-π from Arg or Lys to a base (6.0 Å to the ring centre)
+    - for a ligand, sugar, lipid or ion on one side: hydrophobic contacts between its carbons that carry no
+      N or O and side-chain carbons of hydrophobic residues (5.0 Å), metal ions on N, O, S (3.0 Å), and halide
+      ions on basic groups (4.0 Å)
+    """
+    rows = []
     for line in pdb_text.splitlines():
-        if not line.startswith('ATOM'):
-            continue
-        name, resname, chain = line[12:16].strip(), line[17:20].strip(), line[21]
-        item = (chain, f'{resname} {int(line[22:26])}', name, (float(line[30:38]), float(line[38:46]), float(line[46:54])))
-        if name in BASIC.get(resname, ()):
-            basic.append(item)
-        elif name in PHOSPHATE:
-            phos.append(item)
+        if line.startswith('ATOM'):
+            rows.append((line[21], line[17:20].strip(), int(line[22:26]), line[12:16].strip(),
+                         line[76:78].strip().upper(), float(line[30:38]), float(line[38:46]), float(line[46:54])))
+    if not rows:
+        return []
+    chain, resname, resnum, name, element = (np.array(c) for c in list(zip(*rows))[:5])
+    xyz = np.array([r[5:] for r in rows])
+    res = np.array([f'{r} {n}' for r, n in zip(resname, resnum)])
+    polymer = np.isin(resname, list(AMINO)) | np.isin(resname, BASES)
+    side = {a: chain == a, b: chain == b}
     best = {}
-    for c1, r1, n1, p1 in basic:
-        for c2, r2, n2, p2 in phos:
-            if c1 == c2:
-                continue
-            d = sum((u - v) ** 2 for u, v in zip(p1, p2)) ** 0.5
-            if d <= cutoff:
-                row = (r1, n1, r2, n2) if c1 == a else (r2, n2, r1, n1)
-                key = (row[0], row[2])
-                if key not in best or d < best[key][-1]:
-                    best[key] = ('Salt bridge / ionic', *row, round(d, 2))
+
+    def add(kind, i, j, d):          # i, j: atom rows on either side; keep the closest pair per residue pair
+        if chain[i] != a:
+            i, j = j, i
+        key = (kind, res[i], res[j])
+        if key not in best or d < best[key][-1]:
+            best[key] = (kind, res[i], name[i], res[j], name[j], round(float(d), 2))
+
+    def pairs(kind, first, second, cutoff):
+        for one, two in ((a, b), (b, a)):
+            i, j = np.where(first & side[one])[0], np.where(second & side[two])[0]
+            if len(i) and len(j):
+                d = np.linalg.norm(xyz[i][:, None] - xyz[j][None], axis=-1)
+                for p, q in zip(*np.where(d <= cutoff)):
+                    add(kind, i[p], j[q], d[p, q])
+
+    basic = np.array([n in BASIC.get(r, ()) for r, n in zip(resname, name)])
+    pairs('Salt bridge / ionic', basic, np.isin(name, ('OP1', 'OP2')), 4.0)
+
+    rings = []                       # (chain, is base, first atom row, centre, normal)
+    start = np.r_[0, np.where((chain[1:] != chain[:-1]) | (res[1:] != res[:-1]))[0] + 1, len(res)]
+    for s, e in zip(start[:-1], start[1:]):
+        for ring in RINGS.get(resname[s], ()):
+            at = [s + k for k in range(e - s) if name[s + k] in ring]
+            if len(at) == len(ring):
+                centre = xyz[at].mean(0)
+                rings.append((chain[s], resname[s] in BASES, at[0], centre, np.linalg.svd(xyz[at] - centre)[2][2]))
+    for c1, base1, i, p1, n1 in rings:
+        for c2, base2, j, p2, n2 in rings:
+            if c1 == a and c2 == b and (base1 != base2):
+                d = np.linalg.norm(p1 - p2)
+                angle = np.degrees(np.arccos(min(abs(float(n1 @ n2)), 1.0)))
+                if d <= 7.0 and (angle <= 30 or angle >= 60):
+                    add('Pi-pi stacking', i, j, d)
+    for is_cation in (np.array([CATION.get(r) == n for r, n in zip(resname, name)]),):
+        for c, base, j, centre, _ in rings:
+            if base:
+                i = np.where(is_cation & ~side[c] & (side[a] | side[b]))[0]
+                for k in i[np.linalg.norm(xyz[i] - centre, axis=1) <= 6.0] if len(i) else ():
+                    add('Cation-pi', k, j, np.linalg.norm(xyz[k] - centre))
+
+    if not polymer.all():
+        other = ~polymer
+        lone = np.array([(res == r).sum() == 1 for r in res]) & other
+        metal, halide = lone & np.isin(element, list(METALS)), lone & np.isin(element, list(HALIDES))
+        pairs('Metal coordination', metal, np.isin(element, ('N', 'O', 'S')) & ~lone, 3.0)
+        pairs('Salt bridge / ionic', halide, basic, 4.0)
+        carbon = other & (element == 'C')
+        hetero = np.where(other & np.isin(element, ('N', 'O')))[0]
+        if carbon.any() and len(hetero):
+            idx = np.where(carbon)[0]
+            polar = (np.linalg.norm(xyz[idx][:, None] - xyz[hetero][None], axis=-1) < 1.7).any(1)
+            carbon[idx[polar]] = False
+        greasy = np.isin(resname, list(GREASY)) & (element == 'C') & ~np.isin(name, ('C', 'CA'))
+        pairs('Hydrophobic', carbon, greasy | carbon, 5.0)
     return list(best.values())
 
 
@@ -67,7 +134,7 @@ def _frame(job):
             if c1 != a:  # chain a always on the left
                 r1, a1, r2, a2 = r2, a2, r1, a1
             rows.append((t, r1, a1, r2, a2, d))
-    rows += _phosphate_bridges(pdb_text, a, b)
+    rows += _extra_contacts(pdb_text, a, b)
     return rows, [(c, r, area) for (c, r), area in buried.items()]
 
 
@@ -122,12 +189,17 @@ def analyze(ensemble: Ensemble, cutoff: float = 4.5, workers: Optional[int] = No
                 print(f'\r  analysing frames with PandaPPI: {i}/{len(jobs)}', end='', flush=True)
     if progress:
         print()
+    # PandaPPI names a residue by what the PDB frame holds (three letters, the frame's own number): show it by
+    # its full name and original number instead
+    at = ensemble.atoms
+    shown = {(c, f'{r[:3]} {n}'): label for c, r, n, label in zip(at.chain, at.resname, at.resnum, ensemble.labels)}
     contacts, buried, vdw = [], [], np.zeros(len(jobs), int)
     for i, (rows, areas) in enumerate(results):
         x = ensemble.x[i]
         vdw[i] = sum(r[0] == 'Van der Waals' for r in rows)
-        contacts += [(i, x, *r) for r in rows if r[0] not in SKIP]
-        buried += [(i, x, *r) for r in areas]
+        contacts += [(i, x, t, shown.get((a, r1), r1), a1, shown.get((b, r2), r2), a2, d)
+                     for t, r1, a1, r2, a2, d in rows if t not in SKIP]
+        buried += [(i, x, c, shown.get((c, r), r), area) for c, r, area in areas]
     return Analysis(
         ensemble,
         pd.DataFrame(contacts, columns=['frame', 'x', 'type', 'residue_a', 'atom_a', 'residue_b', 'atom_b',
@@ -154,7 +226,9 @@ class Scene:
         self.smooth = smooth
         a, b = ens.chains
         atoms = ens.atoms
-        label = atoms.resname + ' ' + atoms.resnum.astype(str)
+        label = ens.labels
+        self.rank = {k: i for i, k in reversed(list(enumerate(zip(atoms.chain, label))))}     # order along a chain
+        self.number = dict(zip(zip(atoms.chain, label), atoms.resnum.tolist()))   # the number in the PDB frames
         by_name = {k: i for i, k in enumerate(zip(atoms.chain, label, atoms.name))}
         by_res: Dict[tuple, np.ndarray] = {k: g.values for k, g in
                                            pd.Series(atoms.index).groupby([atoms.chain, label])}
@@ -188,6 +262,21 @@ class Scene:
         self.dist = np.linalg.norm(ens.coords[frames[None], ea] - ens.coords[frames[None], eb], axis=-1) \
             if K else np.zeros((0, F))
         self.present = present
+        # the water each water-mediated contact goes through, per frame: the one closest to both of its atoms
+        self.bridge = {}
+        if ens.waters is not None:
+            for k, (t, _, _) in enumerate(keys):
+                if t != 'Water-mediated':
+                    continue
+                pos = np.full((F, 3), np.nan)
+                for f in np.where(present[k] > 0)[0]:
+                    w = ens.waters[f]
+                    if len(w):
+                        reach = np.maximum(np.linalg.norm(w - ens.coords[f, ea[k, f]], axis=1),
+                                           np.linalg.norm(w - ens.coords[f, eb[k, f]], axis=1))
+                        if reach.min() <= 4.5:
+                            pos[f] = w[reach.argmin()]
+                self.bridge[k] = pos
         self.occ = _smooth(present, smooth, ens.periodic)
 
         types = [c['type'] for c in self.contacts]
@@ -214,8 +303,7 @@ class Scene:
         right = self._busiest([self.contacts[k]['residue_b'] for k in cand], weight[cand], max_residues)
         self.drawn = [k for k in cand if self.contacts[k]['residue_a'] in left
                       and self.contacts[k]['residue_b'] in right]
-        num = lambda res: int(res.split()[1])
-        self.left = sorted({self.contacts[k]['residue_a'] for k in self.drawn}, key=num)
+        self.left = sorted({self.contacts[k]['residue_a'] for k in self.drawn}, key=lambda r: self.rank[(a, r)])
         lpos = {r: i for i, r in enumerate(self.left)}
         partners: Dict[str, list] = {}
         for k in self.drawn:
@@ -223,7 +311,7 @@ class Scene:
             partners.setdefault(c['residue_b'], []).append((lpos[c['residue_a']], weight[k]))
         # order the right side by where its partners sit, to cut line crossings
         self.right = sorted(partners, key=lambda r: (np.average([p for p, _ in partners[r]],
-                                                                weights=[w for _, w in partners[r]]), num(r)))
+                                                                weights=[w for _, w in partners[r]]), self.rank[(b, r)]))
         self.hidden = len(cand) - len(self.drawn)
 
     @staticmethod

@@ -28,6 +28,7 @@ dependencies = [
 
 [project.optional-dependencies]
 md = ["MDAnalysis>=2.0"]
+movie3d = ["pymol-open-source-whl"]
 test = ["pytest"]
 
 [project.scripts]

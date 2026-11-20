@@ -11,13 +11,22 @@ import numpy as np
 from matplotlib.animation import FFMpegWriter, FuncAnimation
 from matplotlib.lines import Line2D
 from pandappi.visualization.interaction_map import (BURIED_MIN, CHAIN_COLORS, CLASS_COLOR, GREY, INK, NATURE_RC,
-                                                    RED, RESIDUE_CLASS, TYPE_STYLE, _short, _style)
+                                                    RED, RESIDUE_CLASS, TYPE_STYLE, _style)
 
 from .analysis import Scene
 
 RC = {**NATURE_RC, 'font.size': 11, 'axes.labelsize': 11, 'axes.titlesize': 12, 'xtick.labelsize': 9.5,
       'ytick.labelsize': 10, 'legend.fontsize': 9.5, 'axes.linewidth': 0.8, 'xtick.major.width': 0.8,
       'ytick.major.width': 0.8, 'xtick.major.size': 3, 'ytick.major.size': 3}
+AMINO = {r for r in RESIDUE_CLASS if len(r) == 3}
+
+
+def _short(res: str) -> str:
+    """'ASP 100A' -> 'Asp 100A': amino acids in mixed case, everything else (nucleotides, ligands) as it is."""
+    name, _, rest = res.partition(' ')
+    return f'{name.capitalize() if name in AMINO else name} {rest}'
+
+
 DIRECTIONAL = ('Hydrogen bond', 'Salt bridge / ionic', 'Disulfide')  # the contacts that get a distance label
 
 

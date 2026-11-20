@@ -82,11 +82,14 @@ def test_wrong_chain_lists_the_chains(wrapped):
         ensembles.md(*wrapped, chains=['A', 'D'])
 
 
-def test_side_of_two_chains_is_renumbered():
+def test_side_of_two_chains_keeps_its_numbers():
+    """Heavy and light chain on one side, their numbers repeating: the frames get running numbers, the residues
+    keep their own, with the chain in front."""
     ens = ensembles.md('examples/data/1BJ1.pdb', select=['chainID H L', 'chainID W'])
-    assert any('shifted' in line for line in ens.log)
     side = ens.atoms[ens.atoms.chain == 'A']
-    assert side.resnum.max() > 1000
+    assert side.resid.str.startswith(('H:', 'L:')).all() and {'H:1', 'H:100', 'L:1'} <= set(side.resid)
+    assert side.resnum.max() == side.resid.nunique() <= 9999
+    assert not ens.atoms[ens.atoms.chain == 'B'].resid.str.contains(':').any()
 
 
 def test_renumber_restores_original_numbers(wrapped):
@@ -112,8 +115,8 @@ def test_phosphate_salt_bridge():
     pdb = ('ATOM      1  NZ  LYS A  10       0.000   0.000   0.000  1.00  0.00           N\n'
            'ATOM      2  OP1  DG B   5       3.000   0.000   0.000  1.00  0.00           O\n'
            'ATOM      3  OP2  DG B   6       9.000   0.000   0.000  1.00  0.00           O\n')
-    assert analysis._phosphate_bridges(pdb, 'A', 'B') == [('Salt bridge / ionic', 'LYS 10', 'NZ', 'DG 5', 'OP1', 3.0)]
-    assert analysis._phosphate_bridges(pdb, 'B', 'A')[0][1:3] == ('DG 5', 'OP1')   # side a always first
+    assert analysis._extra_contacts(pdb, 'A', 'B') == [('Salt bridge / ionic', 'LYS 10', 'NZ', 'DG 5', 'OP1', 3.0)]
+    assert analysis._extra_contacts(pdb, 'B', 'A')[0][1:3] == ('DG 5', 'OP1')   # side a always first
 
 
 def test_interface_water_is_followed(tmp_path):
@@ -160,8 +163,97 @@ def test_gromacs_top(tmp_path, reference, wrapped):
     text += '[ system ]\ntest\n\n[ molecules ]\nProtein_chain_A 1\nProtein_chain_D 1\n'
     top = tmp_path / 'topol.top'
     top.write_text(text)
-    ens = ensembles.md(str(top), wrapped[1], renumber={'B': 1})   # a .top counts residues on through the chains
+    ens = ensembles.md(str(top), wrapped[1])            # each molecule keeps its own residue numbers
     assert ens.chains == ('A', 'B')
     assert _contacts(ens)[0].equals(reference[0])
     with pytest.raises(ValueError, match='no coordinates'):
         ensembles.md(str(top), None)
+
+
+def test_trajectory_saved_for_part_of_the_system(tmp_path, reference):
+    """A trajectory written for the heavy atoms only, against the topology of everything: the part is recognised."""
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        u = mda.Universe(TOP, TRAJ)
+        heavy = u.select_atoms('not (name H* or name [123]H*)')
+        with mda.Writer(str(tmp_path / 'heavy.dcd'), heavy.n_atoms) as w:
+            for ts in u.trajectory[np.linspace(0, len(u.trajectory) - 1, FRAMES).round().astype(int)]:
+                w.write(heavy)
+    ens = ensembles.md(TOP, str(tmp_path / 'heavy.dcd'), chains=['A', 'D'])
+    assert any('without hydrogens' in line for line in ens.log)
+    assert _contacts(ens)[0].equals(reference[0])
+
+
+def test_topology_for_the_first_atoms_only(tmp_path, reference):
+    """The reverse: a solute-only topology with a trajectory that goes on (solvent after the solute)."""
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        u = mda.Universe(TOP, TRAJ)
+        n = u.atoms.n_atoms
+        with mda.Writer(str(tmp_path / 'more.dcd'), n + 300) as w:
+            big = mda.Universe.empty(n + 300, trajectory=True)
+            for ts in u.trajectory[np.linspace(0, len(u.trajectory) - 1, FRAMES).round().astype(int)]:
+                big.atoms.positions = np.r_[ts.positions, ts.positions[:300] + 40]
+                big.dimensions = ts.dimensions
+                w.write(big.atoms)
+    ens = ensembles.md(TOP, str(tmp_path / 'more.dcd'), chains=['A', 'D'])
+    assert any('first' in line for line in ens.log)
+    assert _contacts(ens)[0].equals(reference[0])
+    with pytest.raises(ValueError, match='no usual part'):       # a count nothing explains is still an error
+        with mda.Writer(str(tmp_path / 'odd.dcd'), 777) as w:
+            w.write(u.atoms[:777])
+        ensembles.md(TOP, str(tmp_path / 'odd.dcd'))
+
+
+def test_insertion_codes(tmp_path):
+    """Residues 38 and 38A are two residues, and keep those names."""
+    lines = []
+    for line in open('examples/data/1BRS.pdb'):
+        if line.startswith('ATOM') and line[21] == 'D' and int(line[22:26]) >= 39:
+            num = int(line[22:26]) - 1
+            line = line[:22] + f'{num:4d}' + ('A' if num == 38 else ' ') + line[27:]
+        lines.append(line)
+    pdb = tmp_path / 'icode.pdb'
+    pdb.write_text(''.join(lines))
+    for kw in (dict(chains=['A', 'D']), dict(select=['chainID A', 'chainID D'])):    # both readers
+        ens = ensembles.nma(str(pdb), frames=2, **kw)
+        side = ens.atoms[ens.atoms.chain == ens.chains[1]]
+        assert {'38', '38A', '39'} <= set(side.resid)
+        assert side.groupby('resid').resnum.nunique().max() == 1 and side.resnum.nunique() == side.resid.nunique()
+    scene = analysis.analyze(ens, workers=1, progress=False).scene()
+    assert any(c['residue_b'].endswith(' 38A') for c in scene.contacts)
+
+
+def test_metal_ion_as_a_side():
+    """A selection without protein in it (here the zinc of ACE2) is followed as it is."""
+    ens = ensembles.nma('examples/data/6M0J.pdb', select=['chainID A', 'resname ZN'], frames=2)
+    assert ens.atoms[ens.atoms.kind == 'other'].element.tolist() == ['ZN']
+    contacts = analysis.analyze(ens, workers=1, progress=False).contacts
+    assert (contacts.type == 'Metal coordination').sum() >= 3
+
+
+def test_base_stacking_and_ligand_contacts():
+    hexagon = [(1.4 * np.cos(k * np.pi / 3), 1.4 * np.sin(k * np.pi / 3)) for k in range(6)]
+    row = lambda i, name, res, chain, num, x, y, z, el: (
+        f'ATOM  {i:5d} {name:<4} {res:>3} {chain}{num:4d}    {x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00          {el:>2}\n')
+    pdb = ''.join(row(i, n, 'PHE', 'A', 7, x, y, 0, 'C')
+                  for i, (n, (x, y)) in enumerate(zip(('CG', 'CD1', 'CE1', 'CZ', 'CE2', 'CD2'), hexagon)))
+    pdb += ''.join(row(9 + i, n, 'DC', 'B', 3, x, y, 3.6, n[0])
+                   for i, (n, (x, y)) in enumerate(zip(('N1', 'C2', 'N3', 'C4', 'C5', 'C6'), hexagon)))
+    assert [r[:2] for r in analysis._extra_contacts(pdb, 'A', 'B')] == [('Pi-pi stacking', 'PHE 7')]
+    pdb = row(1, 'CD1', 'LEU', 'A', 5, 0, 0, 0, 'C') + row(2, 'C7', 'LIG', 'B', 1, 4, 0, 0, 'C') + \
+        row(3, 'C8', 'LIG', 'B', 1, 4, 1.4, 0, 'C') + row(4, 'O1', 'LIG', 'B', 1, 4, 2.6, 0, 'O')
+    assert analysis._extra_contacts(pdb, 'A', 'B') == [('Hydrophobic', 'LEU 5', 'CD1', 'LIG 1', 'C7', 4.0)]
+
+
+def test_prmtop_residue_numbers(tmp_path):
+    """An Amber prmtop that carries the PDB numbers and chains (parmed addPDB) is read with them."""
+    top = tmp_path / 'x.prmtop'
+    top.write_text('%VERSION\n%FLAG RESIDUE_NUMBER\n%FORMAT(20I4)\n   3   4   1\n'
+                   '%FLAG RESIDUE_CHAINID\n%FORMAT(20a4)\nA   A   D   \n')
+    u = ensembles._empty(mda, ['N', 'CA', 'N', 'CA', 'N', 'CA'], ['ALA'] * 6, [1, 1, 2, 2, 3, 3], [0] * 6)
+    notes = []
+    ensembles._original_numbers(mda, u, str(top), notes)
+    assert u.residues.resids.tolist() == [3, 4, 1] and u.atoms.chainIDs.tolist() == list('AAAADD') and notes

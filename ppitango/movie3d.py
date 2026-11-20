@@ -12,7 +12,7 @@ from pandappi.visualization.interaction_map import CHAIN_COLORS, _style
 from . import movie
 from .analysis import Scene
 from .ensembles import _pdb_text
-from .viewer import _canonical
+from .viewer import _bridges, _canonical
 
 TAN_HALF_FOV = np.tan(np.radians(7))  # PyMOL field of view 14°
 
@@ -46,17 +46,24 @@ def _project(p: np.ndarray, view: list, width: int, height: int):
 def render(scene: Scene, output: str, seconds: float = 12.0, fps: int = 15, title: str = '',
            width: int = 940, height: int = 918, workers: int = 0) -> str:
     """Write the 3D movie to `output` (.mp4). Needs the `pymol` command (pymol-open-source)."""
-    pymol = shutil.which('pymol')
-    if not pymol:
-        raise RuntimeError('PyMOL not found. Install it with: conda install -c conda-forge pymol-open-source')
+    # the pymol command (conda, Homebrew), or the module of the pip wheel, which installs no command
+    import importlib.util
+    import sys
+    if shutil.which('pymol'):
+        pymol = [shutil.which('pymol')]
+    elif importlib.util.find_spec('pymol'):
+        pymol = [sys.executable, '-m', 'pymol']
+    else:
+        raise RuntimeError('PyMOL not found. Install it with: pip install "ppi-tango[movie3d]"  (or: conda install '
+                           '-c conda-forge pymol-open-source)')
     ens = scene.ensemble
     a, b = ens.chains
     n = max(int(seconds * fps), 2)
     us = movie.positions(scene, n)
     coords = _canonical(scene)                                   # frames on the first axis
+    bridges = _bridges(scene)
     at = lambda arr, u: movie.sample(np.moveaxis(arr, 0, -1), u, ens.periodic)
     shown = [k for k in range(len(scene.contacts)) if scene.occ[k].max() >= 0.5]
-    num = lambda res: int(res.split()[1])
     reach = float(np.linalg.norm(coords[0], axis=1).max()) + 8
     face = coords[0][np.unique(np.concatenate([scene.atom_a[shown].ravel(), scene.atom_b[shown].ravel()]))]
     near = max(float(np.percentile(np.linalg.norm(face, axis=1), 90)) * 1.25, 14.0)
@@ -68,29 +75,35 @@ def render(scene: Scene, output: str, seconds: float = 12.0, fps: int = 15, titl
             models.append(f'MODEL {i + 1}\n' + _pdb_text(ens.atoms, xyz).replace('END\n', 'ENDMDL\n'))
             f0 = int(round(u)) % ens.n_frames                    # contact atoms: those of the nearest frame
             view = _camera(i / (n - 1), reach * 0.8 / TAN_HALF_FOV, near / TAN_HALF_FOV, reach)
-            contacts, texts = [], []
+            contacts, texts, waters = [], [], []
             for k in shown:
                 if movie.sample(scene.occ[k], u, ens.periodic) < 0.5:
                     continue
                 kind = scene.contacts[k]['type']
                 p, q = xyz[scene.atom_a[k, f0]], xyz[scene.atom_b[k, f0]]
-                contacts.append([*p.round(3).tolist(), *q.round(3).tolist(), _style(kind)[0]])
+                w = bridges[k][f0] if k in bridges else None
+                if w is not None and not np.isnan(w[0]):      # a water-mediated contact goes through its water
+                    waters.append(w.round(3).tolist())
+                    contacts += [[*p.round(3).tolist(), *w.round(3).tolist(), _style(kind)[0]],
+                                 [*w.round(3).tolist(), *q.round(3).tolist(), _style(kind)[0]]]
+                else:
+                    contacts.append([*p.round(3).tolist(), *q.round(3).tolist(), _style(kind)[0]])
                 if kind in movie.DIRECTIONAL:  # distance labels are drawn on the picture afterwards, crisp
                     texts.append((*_project((p + q) / 2, view, width, height), f'{np.linalg.norm(p - q):.1f} Å',
                                   _style(kind)[0]))
-            frames.append(dict(view=view, contacts=contacts))
+            frames.append(dict(view=view, contacts=contacts, waters=waters))
             labels.append(texts)
         with open(f'{tmp}/traj.pdb', 'w') as f:
             f.write(''.join(models))
         json.dump(dict(pdb=f'{tmp}/traj.pdb', out=tmp, chains=[a, b], width=width, height=height,
                        colors={a: CHAIN_COLORS[0], b: CHAIN_COLORS[1]}, frames=frames,
-                       interface={a: sorted({num(scene.contacts[k]['residue_a']) for k in shown}),
-                                  b: sorted({num(scene.contacts[k]['residue_b']) for k in shown})}),
+                       interface={a: sorted({scene.number[(a, scene.contacts[k]['residue_a'])] for k in shown}),
+                                  b: sorted({scene.number[(b, scene.contacts[k]['residue_b'])] for k in shown})}),
                   open(f'{tmp}/job.json', 'w'))
         parts = workers or 2  # PyMOL's ray tracer is itself multi-threaded
         print(f'  ray-tracing {n} frames with PyMOL ({parts} processes) ...')
         script = os.path.join(os.path.dirname(__file__), '_pymol_frames.py')
-        procs = [subprocess.Popen([pymol, '-cq', script, '--', f'{tmp}/job.json', str(p), str(parts)],
+        procs = [subprocess.Popen([*pymol, '-cq', script, '--', f'{tmp}/job.json', str(p), str(parts)],
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) for p in range(parts)]
         logs = [p.communicate()[0] for p in procs]
         images = [f'{tmp}/f{i:05d}.png' for i in range(n)]

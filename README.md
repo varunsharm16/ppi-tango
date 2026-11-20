@@ -26,10 +26,11 @@ pip install "ppi-tango[md] @ git+https://github.com/varunsharm16/ppi-tango"
 
 That is everything for normal modes, MD and FEP input, the 2D movie and the interactive viewer
 (ffmpeg comes bundled). Leave out `[md]` if you only need normal modes or multi-model PDB files.
-The 3D movie additionally needs the `pymol` command:
+The 3D movie additionally needs PyMOL, from pip or from conda:
 
 ```bash
-conda install -c conda-forge pymol-open-source
+pip install "ppi-tango[md,movie3d] @ git+https://github.com/varunsharm16/ppi-tango"
+conda install -c conda-forge pymol-open-source      # or this, next to a plain install
 ```
 
 ## Use
@@ -53,13 +54,19 @@ ppitango md step5.psf step5.dcd --dt 0.1                    # CHARMM / NAMD
 ```
 
 Give the files as your MD program wrote them. The first file is any structure or topology
-[MDAnalysis](https://www.mdanalysis.org) reads (pdb, gro, tpr, top, prmtop/parm7, psf) that holds **the same atoms
-in the same order** as the trajectory (xtc, trr, dcd, nc ...). Nothing needs preparing by hand:
+[MDAnalysis](https://www.mdanalysis.org) reads (pdb, gro, tpr, top, prmtop/parm7, psf); the second any
+trajectory (xtc, trr, dcd, nc ...). Nothing needs preparing by hand:
 
 - **Water, ions, lipids, ligands and hydrogens** are dropped. What stays is every residue with a protein or
   nucleic acid backbone, whatever the force field calls it (HIE, HSD, CYX ... are understood).
-- **Periodic boxes**: chains cut by the box are made whole and the two partners are put back next to each
+- **Periodic boxes**: chains cut by the box are made whole and the partners are put back next to each
   other in every frame, so a raw trajectory works without `gmx trjconv -pbc` or `cpptraj autoimage`.
+- **Topology and trajectory for different sets of atoms.** A trajectory saved for part of the system
+  (`gmx trjconv` or `compressed-x-grps` with Protein, `cpptraj strip`) works with the full topology: the part
+  is recognised by its atom count (protein, protein and nucleic acid, everything but water, everything but
+  water and ions, each also without hydrogens, the backbone, the Cα atoms) and checked against the bond
+  lengths. The reverse works too: a solute-only topology with a full trajectory, when the solute comes first
+  in the system, as MD programs write it. What was assumed is printed.
 - **Chains.** With chain IDs in the topology, `--chains A D` picks two; left out, the pair with most contacts
   is followed. Files without chain IDs (gro, prmtop, most psf) get their chains lettered A, B, C ... in file
   order, split wherever the backbone breaks, and the table is printed so you can pick:
@@ -73,15 +80,22 @@ in the same order** as the trajectory (xtc, trr, dcd, nc ...). Nothing needs pre
 - **Anything else is a selection**: `--select "segid PROA" "segid PROB"`, `--select "resid 1-220" "resid 221-330"`,
   or a side made of several chains, `--select "chainID H L" "chainID W"` for an antibody against its antigen
   ([selection language](https://userguide.mdanalysis.org/stable/selections.html)).
-- **Residue numbers.** A `.tpr`, a GROMACS `.top` and an Amber `prmtop` count residues 1, 2, 3 ... straight through all chains,
-  so the second chain starts at 109 or 111 instead of 1. `--renumber B:1` (chain, number of its first residue) puts
-  a chain back on its own numbers; a `.gro` or PDB as topology keeps the original numbers by itself.
+- **Residue numbers** are the ones of your structure wherever a file still has them: PDB, `.gro`, a GROMACS
+  `.top` (each molecule keeps its numbers), a `.tpr` with the `.gro` of the same name next to it, an Amber
+  `prmtop` that carries them (`parmed`'s `addPDB`). A `.tpr` or `prmtop` on its own counts 1, 2, 3 ...
+  straight through all chains: `--renumber B:1` (chain, number of its first residue) puts a chain back on its
+  own numbers. Insertion codes are kept (Tyr 100A), and when a side holds several chains its residues are
+  named with the chain in front (H:100A, L:32).
+- **Ligands, ions, sugars, lipids**: name them in a selection of their own and they are a side like any
+  other: `--select protein "resname JZ4"`, `--select "chainID A" "resname ZN"`, `--select protein "resname NAG"`.
+  A selection that holds protein or nucleic acid keeps only that (so `chainID A` does not drag the waters
+  and buffer of chain A along).
 - **Water-mediated contacts**: `--waters` follows the waters within hydrogen-bond reach of both sides in every
   frame (give the full-system topology and trajectory, not a stripped one).
-- **Protein-DNA and protein-RNA**: `--select protein nucleic` puts all protein chains on one side and both
-  strands on the other. Hydrogen bonds come from PandaPPI; salt bridges from Arg, Lys and His to backbone
-  phosphates are added by ppi-tango. Works the same for `nma` (the network gets a node at C4' of every
-  nucleotide) and `fep`.
+- **Protein-DNA and protein-RNA**: a file with both is read as all protein chains against all nucleic acid
+  chains unless you say otherwise. Hydrogen bonds come from PandaPPI; ppi-tango adds salt bridges from Arg,
+  Lys and His to backbone phosphates, stacking of aromatic side chains on bases and cation-π from Arg and Lys
+  to bases. Works the same for `nma` (the network gets a node at C4' of every nucleotide) and `fep`.
 - **Time axis**: read from the trajectory when it stores times (xtc, trr, nc). DCD files do not, so give
   `--dt` (time between saved frames, with `--unit`), or the axis counts frames.
 - **Long trajectories**: 200 evenly spaced frames are analysed (`--max-frames`, `--stride`), and only those
@@ -206,50 +220,58 @@ the contacts of the reference run (`tests/test_trajectory.py` keeps the core of 
 | Input | Result |
 | --- | --- |
 | GROMACS 2025: `md.tpr` or `md.gro` + raw `md.xtc` (dodecahedron box, water, ions, molecules cut by the box) | same contacts and distances as the `trjconv -pbc mol` trajectory |
-| GROMACS 2026: `topol.top` (with the `.itp` files `pdb2gmx` wrote) or `md.tpr` + raw `md.xtc`, MDAnalysis 2.11 | same contacts and distances as `md.gro` + `md.xtc` |
+| GROMACS 2026, with and without GROMACS installed, MDAnalysis 2.10 and 2.11: `md.tpr`, `md.gro` or `topol.top` (with the `.itp` files `pdb2gmx` wrote) + raw `md.xtc` | same contacts, distances and residue numbers from all three |
+| The same run with the trajectory saved for Protein, for Protein-H or without water, against the full `.tpr`, `.gro` and `.top`; and a protein-only `.gro` with the full trajectory | same again, all ten combinations |
 | GROMACS protein-only `.gro`/`.pdb` + `.xtc` | same |
 | Amber: `prmtop` + NetCDF, full system (truncated octahedron) and stripped; `ambpdb`-style PDB without chains | all four agree |
 | CHARMM-style PSF + DCD; PDB with HSD, ILE CD, OT1/OT2 and segment names only | same as reference |
 | OpenMM PDB + DCD, multi-model PDB, FEP windows | unchanged from the demos |
 | 12,800-frame trajectory (150 MB) | 70 s on 8 cores without movies |
-| Antibody heavy + light chain against antigen (`--select`) | runs |
-| Protein-DNA (λ repressor-operator, 1LMB): 50 ps of explicit-solvent MD with water, normal modes, and the FEP path on stand-in windows | run; phosphate salt bridges and water-mediated contacts found |
+| Antibody heavy + light chain against antigen (`--select`, 1BJ1); Fab with Kabat insertion codes (1HZH, 100A-100J) | run; residues keep their names (H:100A) |
+| Ligand in a buried pocket (T4 lysozyme L99A with 2-propylphenol, 3HTB); zinc sites of a zinc finger (1ZAA) and of ACE2 (6M0J) | hydrogen bonds and 13 hydrophobic contacts to the ligand; every zinc on its four Cys/His |
+| Protein-DNA: zinc finger Zif268 on its site (1ZAA), λ repressor-operator (1LMB) with 50 ps of explicit-solvent MD, normal modes, and the FEP path on stand-in windows | run; phosphate salt bridges, base stacking, cation-π and water-mediated contacts found |
 | Python 3.9 and 3.12 on macOS; 3.10, 3.12, 3.13 on Linux, 3.12 on macOS and Windows (CI) | pass |
 | Alliance Canada cluster (narval) login node, no display: fresh virtualenv from the site wheels (numpy 2.4, MDAnalysis 2.10), `.gro` + raw `.xtc`, `--waters`, normal modes, 2D movie | run; a GROMACS 2026 `.tpr` is too new for MDAnalysis (see below) |
 
 What does not work, or needs care:
 
-- **Topology and trajectory must match atom for atom.** A protein-only trajectory with the full-system
-  topology (or the reverse) stops with an error saying so; write both for the same group of atoms.
-- **A GROMACS `.top` needs a trajectory and the files it includes.** It lists the atoms without coordinates,
-  so it works for `md` and `fep` with a trajectory, not on its own (normal modes need the `.gro`). Its
-  `#include` lines are followed: the chain `.itp` files must sit next to it, and the force field is looked up
-  in the GROMACS installation (`gmx` on the `PATH`, or `GMXDATA`/`GMXLIB` set, so `module load gromacs`
-  first on a cluster). Without GROMACS at hand, give the `.gro` or `.tpr`.
+- **A trajectory for an unusual part of the system.** A trajectory and a topology with different atom
+  counts are matched up as described above. A custom index group (one chain of several, a hand-picked
+  region) is not recognised and stops with an error saying both counts: write the topology for that group
+  (`gmx editconf -n`, `gmx convert-tpr -n`).
+- **A GROMACS `.top` needs a trajectory**, since it holds no coordinates (normal modes need the `.gro`). Its
+  `#include` lines are followed. Without GROMACS on the machine the force field files are not there: water and
+  ions are then filled in from their names, which covers the usual protein-in-water system; another molecule
+  defined only in a force field file stops with an error naming it (load GROMACS, or give the `.gro`).
 - **A `.tpr` from a very new GROMACS** may be ahead of MDAnalysis: GROMACS 2026 files are read from
   MDAnalysis 2.11 on, not by 2.10; GROMACS 2025 files not by 2.7. ppi-tango then uses the `.gro` or `.top`
   with the same name next to the `.tpr` (or `topol.top`) if there is one, and says so; otherwise write a
   `.gro` (`gmx editconf -f md.tpr -o md.gro`) and give that, or `pip install -U MDAnalysis`.
-- **A side made of several chains** whose residue numbers repeat gets the later chains shifted by whole
-  thousands (light chain 1-214, heavy chain 1001-1231), which is printed. Insertion codes are ignored.
+- **Residue numbers of a lone `.tpr` or a plain `prmtop`** run straight through the chains (see above):
+  keep the `.gro` next to the `.tpr`, or use `--renumber`.
 - **xtc rounds coordinates to 0.01 Å.** A contact sitting exactly on a cutoff can differ between an xtc and
   a full-precision file of the same run; occupancies are not affected in any way that shows.
-- **Only protein and nucleic acid.** Contacts to ligands, ions, lipids and glycans are not shown; water only
-  with `--waters`. For a water-mediated contact the distance shown is between the two residues' atoms, not to
-  the water, and the water itself is not drawn in 3D.
-- **Nucleic acids**: base stacking on aromatic side chains and other π contacts with bases are not detected
-  (PandaPPI's ring definitions cover amino acids), so protein-DNA maps show hydrogen bonds, phosphate salt
-  bridges and water bridges only. Left to itself the tool follows the pair of chains with most contacts,
-  which in a protein-DNA complex is the two DNA strands: say `--select protein nucleic`.
-- **FEP on protein-DNA** was checked for reading and drawing only, with a plain trajectory cut into stand-in
-  windows; no alchemical protein-DNA calculation was run.
+- **Ligands, ions, sugars and lipids are a side only on their own.** A side cannot mix protein with its
+  ligand or its glycans. For such a side ppi-tango reports PandaPPI's hydrogen bonds (by distance between
+  N and O atoms, without hydrogens), plus its own hydrophobic contacts (carbons without N or O attached, to
+  side-chain carbons of hydrophobic residues), metal coordination and halide salt bridges. Not detected for
+  ligands: aromatic stacking, cation-π, halogen bonds, covalent links. Their atom names are taken as they
+  are, so two ligand atoms with one name in one residue cannot be told apart.
+- **Water-mediated contacts** need `--waters` and the water in both files (not possible when a solute-only
+  topology is matched to a full trajectory). The bridging water is drawn in the 3D viewer and movie; the
+  distance shown is still the one between the two residues' atoms.
+- **Protein-nucleic acid** complexes were tested on structures and a short MD run only. No alchemical
+  protein-DNA calculation was run: the FEP path was checked for reading and drawing with stand-in windows.
 - **One frame is not an animation**: `md` on a single structure stops; use `nma`, or PandaPPI for a static map.
-- **Residue numbers above 9999** are refused (frames go to PandaPPI as PDB text).
-- **3D movie** needs the `pymol` command and is the slow part (about 3 minutes for a 12 s movie on 8 cores);
-  everything else runs headless on a cluster login node without it.
-- **Windows**: the tests and the README commands pass in CI; the 3D movie (PyMOL) was not tried there.
-- **Slides data** (`slides/tools/prep_interface.py`) reads the same inputs (`--select`, `--renumber` too), but
-  the deck draws protein cartoons: both sides must be protein.
+- **More than 9999 residues on one side** cannot be written to the PDB frames PandaPPI reads.
+- **3D movie** needs PyMOL and is the slow part (about 3 minutes for a 12 s movie on 8 cores); everything
+  else runs headless on a cluster login node without it.
+- **Windows**: the tests, the README commands and a 3D movie (PyMOL from pip) run in CI on every push; nobody
+  has looked at the pictures made there.
+- **Slides data** (`slides/tools/prep_interface.py`) reads the same inputs (`--select`, `--renumber` too).
+  The deck was made for two proteins: a nucleic acid side is written as a plain backbone trace through C4',
+  and the data file was produced for a protein-DNA run but the deck was not viewed with it. A ligand or ion
+  side is not supported there.
 
 ## How it works, and what to keep in mind
 
