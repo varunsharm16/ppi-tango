@@ -231,7 +231,7 @@ the contacts of the reference run (`tests/test_trajectory.py` keeps the core of 
 | Ligand in a buried pocket (T4 lysozyme L99A with 2-propylphenol, 3HTB); zinc sites of a zinc finger (1ZAA) and of ACE2 (6M0J) | hydrogen bonds and 13 hydrophobic contacts to the ligand; every zinc on its four Cys/His |
 | Protein-DNA: zinc finger Zif268 on its site (1ZAA), λ repressor-operator (1LMB) with 50 ps of explicit-solvent MD, normal modes, and the FEP path on stand-in windows | run; phosphate salt bridges, base stacking, cation-π and water-mediated contacts found |
 | Python 3.9 and 3.12 on macOS; 3.10, 3.12, 3.13 on Linux, 3.12 on macOS and Windows (CI) | pass |
-| Alliance Canada cluster (narval) login node, no display: fresh virtualenv from the site wheels (numpy 2.4, MDAnalysis 2.10), `.gro` + raw `.xtc`, `--waters`, normal modes, 2D movie | run; a GROMACS 2026 `.tpr` is too new for MDAnalysis (see below) |
+| Alliance Canada cluster (narval) login node, no display: fresh virtualenv from the site wheels (numpy 2.4, MDAnalysis 2.10); GROMACS 2025 and 2026 `.tpr`, `.gro`, `topol.top` with and without the GROMACS module loaded, full and protein-only trajectories, `--waters`, normal modes, 2D movie | run; all nine topology/trajectory combinations give the same contacts and residue numbers |
 
 What does not work, or needs care:
 
