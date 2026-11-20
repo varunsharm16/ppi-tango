@@ -251,7 +251,7 @@ def nma(pdb: str, chains: Optional[Sequence[str]] = None, mode: int = 1, rmsd: f
     res_key = atoms.chain + atoms.resnum.astype(str)
     is_node = atoms.name.isin(['CA', "C4'"]).values
     if 'kind' in atoms:   # a ligand, ion or sugar has no backbone: its first atom is its node
-        is_node |= ((atoms.kind == 'other') & ~res_key.duplicated()).values
+        is_node = is_node | ((atoms.kind == 'other') & ~res_key.duplicated()).values
     node_of = dict(zip(res_key[is_node], range(is_node.sum())))
     missing = ~res_key.isin(node_of)
     if missing.any():  # residues without a node atom (truncated residues) cannot be moved
