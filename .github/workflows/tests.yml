@@ -36,3 +36,9 @@ jobs:
           ppitango nma examples/data/1BRS.pdb --chains A D --movie3d --no-movie --no-viewer --seconds 1 --fps 6 -o out/3d
           ppitango nma examples/data/6M0J.pdb --select "chainID A" "resname ZN" --frames 6 --no-movie -o out/zinc
           ls -la out/3d_3d.mp4 out/zinc_viewer.html
+      - name: Keep the 3D movie, to look at what each system drew
+        uses: actions/upload-artifact@v4
+        with:
+          name: movie3d-${{ matrix.os }}-${{ matrix.python }}
+          path: out/3d_3d.mp4
+          retention-days: 14
