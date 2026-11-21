@@ -266,8 +266,9 @@ What does not work, or needs care:
 - **More than 9999 residues on one side** cannot be written to the PDB frames PandaPPI reads.
 - **3D movie** needs PyMOL and is the slow part (about 3 minutes for a 12 s movie on 8 cores); everything
   else runs headless on a cluster login node without it.
-- **Windows**: the tests, the README commands and a 3D movie (PyMOL from pip) run in CI on every push; nobody
-  has looked at the pictures made there.
+- **Windows, Linux, macOS**: the tests, the README commands and a 3D movie (PyMOL from pip) run in CI on every
+  push, and each run keeps its movie as a download. The three were compared once by eye: same picture, except
+  that Linux falls back to another font when Arial is not installed.
 - **Slides data** (`slides/tools/prep_interface.py`) reads the same inputs (`--select`, `--renumber` too).
   The deck was made for two proteins: a nucleic acid side is written as a plain backbone trace through C4',
   and the data file was produced for a protein-DNA run but the deck was not viewed with it. A ligand or ion
