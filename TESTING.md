@@ -85,6 +85,9 @@ same      charmm             573 contacts, missing 0, extra 0, largest distance 
 same      waters             573 contacts, missing 0, extra 0, largest distance difference 0.010 Å, plus 211 water-mediated
 ```
 
+The count of water-mediated contacts is 211 on our macOS machine and 212 on Linux in CI: one bridge sits
+exactly on a cutoff. The 573 direct contacts are the same everywhere.
+
 With MDAnalysis older than 2.11 the two `md.tpr` runs print `md.tpr is from a GROMACS newer than the installed
 MDAnalysis reads: used md.gro next to it instead`. That is the documented behaviour, not a failure.
 
