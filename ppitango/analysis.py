@@ -2,6 +2,7 @@
 import contextlib
 import io
 import os
+import sys
 import tempfile
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ RINGS = {'PHE': [('CG', 'CD1', 'CD2', 'CE1', 'CE2', 'CZ')], 'TYR': [('CG', 'CD1'
          'TRP': [('CD2', 'CE2', 'CE3', 'CZ2', 'CZ3', 'CH2'), ('CG', 'CD1', 'NE1', 'CE2', 'CD2')],
          'HIS': [('CG', 'ND1', 'CD2', 'CE1', 'NE2')],
          **{r: [SIX, FIVE] for r in ('DA', 'DG', 'A', 'G')}, **{r: [SIX] for r in ('DC', 'DT', 'DU', 'C', 'U')}}
+AMIDES = {'ASN': [('ND2', 'CG', 'OD1')], 'GLN': [('NE2', 'CD', 'OE1')]}   # besides the backbone amide (N, C, O)
 BASES = ('DA', 'DG', 'DC', 'DT', 'DU', 'A', 'G', 'C', 'U')
 AMINO = {'ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU', 'GLY', 'HIS', 'ILE', 'LEU', 'LYS', 'MET', 'PHE', 'PRO',
          'SER', 'THR', 'TRP', 'TYR', 'VAL'}
@@ -53,12 +55,14 @@ def _extra_contacts(pdb_text: str, a: str, b: str):
     side = {a: chain == a, b: chain == b}
     best = {}
 
-    def add(kind, i, j, d):          # i, j: atom rows on either side; keep the closest pair per residue pair
+    def add(kind, i, j, d, centre=()):   # i, j: atom rows on either side; keep the closest pair per residue pair
+        # `centre`: the rows that stand for a ring. The distance is to its centre, so no atom is named there
+        named = ['' if k in centre else name[k] for k in (i, j)]
         if chain[i] != a:
-            i, j = j, i
+            i, j, named = j, i, named[::-1]
         key = (kind, res[i], res[j])
         if key not in best or d < best[key][-1]:
-            best[key] = (kind, res[i], name[i], res[j], name[j], round(float(d), 2))
+            best[key] = (kind, res[i], named[0], res[j], named[1], round(float(d), 2))
 
     def pairs(kind, first, second, cutoff):
         for one, two in ((a, b), (b, a)):
@@ -85,13 +89,13 @@ def _extra_contacts(pdb_text: str, a: str, b: str):
                 d = np.linalg.norm(p1 - p2)
                 angle = np.degrees(np.arccos(min(abs(float(n1 @ n2)), 1.0)))
                 if d <= 7.0 and (angle <= 30 or angle >= 60):
-                    add('Pi-pi stacking', i, j, d)
+                    add('Pi-pi stacking', i, j, d, centre=(i, j))
     for is_cation in (np.array([CATION.get(r) == n for r, n in zip(resname, name)]),):
         for c, base, j, centre, _ in rings:
             if base:
                 i = np.where(is_cation & ~side[c] & (side[a] | side[b]))[0]
                 for k in i[np.linalg.norm(xyz[i] - centre, axis=1) <= 6.0] if len(i) else ():
-                    add('Cation-pi', k, j, np.linalg.norm(xyz[k] - centre))
+                    add('Cation-pi', k, j, np.linalg.norm(xyz[k] - centre), centre=(j,))
 
     if not polymer.all():
         other = ~polymer
@@ -185,10 +189,10 @@ def analyze(ensemble: Ensemble, cutoff: float = 4.5, workers: Optional[int] = No
     with ProcessPoolExecutor(workers) as pool:
         for i, res in enumerate(pool.map(_frame, jobs), 1):
             results.append(res)
-            if progress:
+            if progress and sys.stdout.isatty():   # a counter in a terminal, one line in a log file
                 print(f'\r  analysing frames with PandaPPI: {i}/{len(jobs)}', end='', flush=True)
     if progress:
-        print()
+        print('' if sys.stdout.isatty() else f'  analysed {len(jobs)} frames with PandaPPI')
     # PandaPPI names a residue by what the PDB frame holds (three letters, the frame's own number): show it by
     # its full name and original number instead
     at = ensemble.atoms
@@ -212,8 +216,10 @@ class Scene:
 
     contacts   one entry per (type, residue_a, residue_b) ever seen
     occ        (contacts, frames) smoothed presence, 0..1: the opacity of a contact line
-    dist       (contacts, frames) distance between the contact's two atoms, measured in every frame
-    atom_a/b   (contacts, frames) indices into ensemble.atoms of those two atoms
+    points     (frames, atoms + centres, 3) the atoms of the ensemble, then the centres of the rings and amide
+               groups that contacts are measured to (cation-π, CH-π, π-π stacking, amide-aromatic)
+    dist       (contacts, frames) distance between the contact's two end points, measured in every frame
+    atom_a/b   (contacts, frames) indices into `points` of those two ends: an atom, or the centre of a group
     drawn      indices of the contacts shown on the 2D map; left/right its residues, top to bottom
     """
 
@@ -232,6 +238,22 @@ class Scene:
         by_name = {k: i for i, k in enumerate(zip(atoms.chain, label, atoms.name))}
         by_res: Dict[tuple, np.ndarray] = {k: g.values for k, g in
                                            pd.Series(atoms.index).groupby([atoms.chain, label])}
+        N = len(atoms)
+        names, resnames = atoms.name.values, atoms.resname.values
+        groups: Dict[tuple, int] = {}      # atoms of a ring or amide group -> index of its centre in `points`
+
+        def ends(chain, residue, atom):
+            """What a contact may end on at this residue: its named atom, or else its rings and amide groups."""
+            i = by_name.get((chain, residue, atom))
+            if i is not None:
+                return [(i,)]
+            rows = by_res[(chain, residue)]
+            found = []
+            for group in RINGS.get(resnames[rows[0]], []) + AMIDES.get(resnames[rows[0]], []) + [('N', 'C', 'O')]:
+                at = tuple(rows[np.isin(names[rows], group)])
+                if len(at) == len(group):
+                    found.append(at)
+            return found
 
         df = analysis.contacts
         # the closest atom pair of each contact in each frame
@@ -244,13 +266,26 @@ class Scene:
         for r in df.itertuples(index=False):
             k = kid[(r.type, r.residue_a, r.residue_b)]
             present[k, r.frame] = 1
-            i, j = by_name.get((a, r.residue_a, r.atom_a)), by_name.get((b, r.residue_b, r.atom_b))
-            if i is None or j is None:  # ring centroids and the like: use the closest atoms instead
+            # a contact to a ring or an amide group names no atom on that side: its distance is to the centre of
+            # the group. Which group it was (a tryptophan has two rings) is the one that gives that distance
+            xyz = ens.coords[r.frame]
+            best = None
+            for ga in ends(a, r.residue_a, r.atom_a):
+                for gb in ends(b, r.residue_b, r.atom_b):
+                    off = abs(np.linalg.norm(xyz[list(ga)].mean(0) - xyz[list(gb)].mean(0)) - r.distance)
+                    if best is None or off < best[0]:
+                        best = (off, ga, gb)
+            if best is not None and best[0] < 0.05:
+                i, j = (g[0] if len(g) == 1 else groups.setdefault(g, N + len(groups)) for g in best[1:])
+            else:                       # nothing known fits: the closest atoms of the two residues
                 ia, ib = by_res[(a, r.residue_a)], by_res[(b, r.residue_b)]
-                d = np.linalg.norm(ens.coords[r.frame, ia][:, None] - ens.coords[r.frame, ib][None], axis=-1)
+                d = np.linalg.norm(xyz[ia][:, None] - xyz[ib][None], axis=-1)
                 p, q = np.unravel_index(d.argmin(), d.shape)
                 i, j = ia[p], ib[q]
             ea[k, r.frame], eb[k, r.frame] = i, j
+        self.points = np.concatenate([ens.coords] + [ens.coords[:, list(g)].mean(1, keepdims=True) for g in groups],
+                                     axis=1)
+        self.point_chain = np.r_[atoms.chain.values, [atoms.chain.values[g[0]] for g in groups]]
         # while a contact is absent keep pointing at the atoms it last used, so its line fades in place
         frames = np.arange(F)
         for k in range(K):
@@ -259,7 +294,7 @@ class Scene:
             ea[k], eb[k] = ea[k, nearest], eb[k, nearest]
         self.contacts = [dict(type=t, residue_a=ra, residue_b=rb) for t, ra, rb in keys]
         self.atom_a, self.atom_b = ea, eb
-        self.dist = np.linalg.norm(ens.coords[frames[None], ea] - ens.coords[frames[None], eb], axis=-1) \
+        self.dist = np.linalg.norm(self.points[frames[None], ea] - self.points[frames[None], eb], axis=-1) \
             if K else np.zeros((0, F))
         self.present = present
         # the water each water-mediated contact goes through, per frame: the one closest to both of its atoms
@@ -272,8 +307,8 @@ class Scene:
                 for f in np.where(present[k] > 0)[0]:
                     w = ens.waters[f]
                     if len(w):
-                        reach = np.maximum(np.linalg.norm(w - ens.coords[f, ea[k, f]], axis=1),
-                                           np.linalg.norm(w - ens.coords[f, eb[k, f]], axis=1))
+                        reach = np.maximum(np.linalg.norm(w - self.points[f, ea[k, f]], axis=1),
+                                           np.linalg.norm(w - self.points[f, eb[k, f]], axis=1))
                         if reach.min() <= 4.5:
                             pos[f] = w[reach.argmin()]
                 self.bridge[k] = pos

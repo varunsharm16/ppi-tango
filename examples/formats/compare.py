@@ -2,7 +2,6 @@
 
     python examples/formats/compare.py [formats_out]
 """
-import glob
 import os
 import sys
 
@@ -11,14 +10,19 @@ import pandas as pd
 out = sys.argv[1] if len(sys.argv) > 1 else 'formats_out'
 key = ['frame', 'type', 'residue_a', 'atom_a', 'residue_b', 'atom_b']
 load = lambda name: pd.read_csv(f'{out}/{name}_contacts.csv')
+if not os.path.exists(f'{out}/reference_contacts.csv'):
+    sys.exit(f'{out}/reference_contacts.csv is missing: run bash examples/formats/run_all.sh first')
 ref = load('reference')
 want = set(map(tuple, ref[key].values))
 print(f'reference: {len(ref)} contacts in {ref.frame.nunique()} frames, residues '
       f'{ref.residue_a.iloc[0]} ... / {ref.residue_b.iloc[0]} ...')
+RUNS = ('amber', 'charmm', 'gro_protein_xtc', 'gro_raw', 'protein_gro', 'protein_gro_full', 'top_nowater_xtc',
+        'top_raw', 'tpr_protein_xtc', 'tpr_raw', 'waters')       # every line of run_all.sh but the reference
 bad = 0
-for path in sorted(glob.glob(f'{out}/*_contacts.csv')):
-    name = os.path.basename(path)[:-len('_contacts.csv')]
-    if name == 'reference':
+for name in RUNS:
+    if not os.path.exists(f'{out}/{name}_contacts.csv'):       # a run that failed counts, it is not skipped
+        print(f'MISSING   {name:18s} no table: the run failed or was not made')
+        bad += 1
         continue
     df = load(name)
     if name == 'waters':                                     # the same contacts, plus the water-mediated ones

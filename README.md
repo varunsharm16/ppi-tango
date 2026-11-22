@@ -88,7 +88,10 @@ trajectory (xtc, trr, dcd, nc ...). Nothing needs preparing by hand:
 
 - **Anything else is a selection**: `--select "segid PROA" "segid PROB"`, `--select "resid 1-220" "resid 221-330"`,
   or a side made of several chains, `--select "chainID H L" "chainID W"` for an antibody against its antigen
-  ([selection language](https://userguide.mdanalysis.org/stable/selections.html)).
+  ([selection language](https://userguide.mdanalysis.org/stable/selections.html)). The movies and the viewer
+  head each side with what it is in the file ("Chain C", "Chains A+B", "ZN"); in the tables the two sides of a
+  selection are `A` and `B`, in the order given, and a residue of a side with several chains carries its
+  chain (`H:100A`).
 - **Residue numbers** are the ones of your structure wherever a file still has them: PDB, `.gro`, a GROMACS
   `.top` (each molecule keeps its numbers), a `.tpr` with the `.gro` of the same name next to it, an Amber
   `prmtop` that carries them (`parmed`'s `addPDB`). A `.tpr` or `prmtop` on its own counts 1, 2, 3 ...
@@ -107,6 +110,10 @@ trajectory (xtc, trr, dcd, nc ...). Nothing needs preparing by hand:
   to bases. Works the same for `nma` (the network gets a node at C4' of every nucleotide) and `fep`.
 - **Time axis**: read from the trajectory when it stores times (xtc, trr, nc). DCD files do not, so give
   `--dt` (time between saved frames, with `--unit`), or the axis counts frames.
+- **Topology and trajectory must be of the same run.** The same protein set up by two programs lists its
+  atoms in a different order (GROMACS puts a residue's C and O last, OpenMM and the PDB before the side
+  chain), and coordinates would then land on the wrong atoms. ppi-tango checks bond lengths along the
+  backbone and to Cβ in the first frame and stops when they are off.
 - **Long trajectories**: 200 evenly spaced frames are analysed (`--max-frames`, `--stride`), and only those
   are read, so trajectory length hardly matters.
 
@@ -120,7 +127,10 @@ ppitango fep top.pdb window_*.dcd --chains A D --dg dg.csv --label "barstar Y29 
 
 `dg.csv` has one row per window and a `dG` column (cumulative free energy, kcal/mol, from
 alchemlyb / pymbar / your FEP package). The free energy curve is drawn against λ next to the
-contacts that go with it.
+contacts that go with it. An optional `lambda` column gives each window's λ; without it the windows are
+spaced evenly from 0 to 1. The frames of a window are spread over the stretch to the next window so that the
+axis keeps moving: the λ shown for a frame is where it sits on that path, not a λ it was simulated at (all
+frames of window 3 were run at the λ of window 3).
 
 ### Options that matter
 
@@ -158,14 +168,17 @@ without the trajectory. Press space to play. In it:
 | --- | --- | --- |
 | object `complex` | all atoms, moving through the frames. Its Geometry Nodes hold the look | |
 | nodes `Style Cartoon`, `Style Ball and Stick` | [Molecular Nodes](https://bradyajohnston.github.io/MolecularNodes/) styles | swap or add styles (surface, ribbon, spheres), change materials. Installing the Molecular Nodes add-on puts all its styles in the Add menu |
-| node `Contacts` | dashed lines between the two atoms of each contact, there while the contact is made; red spheres are bridging waters | radius, dash, gap, occupancy threshold, material |
+| node `Contacts` | dashed lines between the two atoms of each contact (the ring centre for contacts to an aromatic ring), there while the contact is made; red spheres are bridging waters | radius, dash, gap, occupancy threshold, material |
 | node `Animate Value` | the clock: which frame is shown at which point of the movie | slow down, speed up, loop |
 | attributes `interface`, `interface_side_chains`, `Color` | the residues that make contacts, and the chain colours | select by them in any node |
 | `camera pivot`, `camera` | fly in, rock around the interface, fly out; a key every quarter second | move or delete keys, or fly by hand |
 | world, `light` | white backdrop, one sun that follows the camera | anything |
+| collection of `complex_frame_N` objects | the atom positions of every frame, which `complex` moves between | leave as it is |
 
 Render from the Render menu, or without the window: `blender -b scene.blend -a`. The scene is set to EEVEE,
-which draws a frame in about a second; switch to Cycles for ray tracing. Open the file with Blender 5.0
+which draws a frame in about a second on a laptop with a graphics card (about half a minute per frame on a
+machine without one); switch to Cycles for ray tracing. Blender prints `Library file, loading empty scene`
+when it opens the file: the scene is stored the way Blender stores assets, and loads all the same. Open the file with Blender 5.0
 or newer (the version of the Python module that wrote it).
 
 ### In slides
@@ -274,7 +287,7 @@ the contacts of the reference run (`tests/test_trajectory.py` keeps the core of 
 | OpenMM PDB + DCD, multi-model PDB, FEP windows | unchanged from the demos |
 | 12,800-frame trajectory (150 MB) | 70 s on 8 cores without movies |
 | Antibody heavy + light chain against antigen (`--select`, 1BJ1); Fab with Kabat insertion codes (1HZH, 100A-100J) | run; residues keep their names (H:100A) |
-| Ligand in a buried pocket (T4 lysozyme L99A with 2-propylphenol, 3HTB); zinc sites of a zinc finger (1ZAA) and of ACE2 (6M0J) | hydrogen bonds and 13 hydrophobic contacts to the ligand; every zinc on its four Cys/His |
+| Ligand in a buried pocket (T4 lysozyme L99A with 2-propylphenol, 3HTB); zinc sites of a zinc finger (1ZAA) and of ACE2 (6M0J) | hydrogen bonds and 13 hydrophobic contacts to the ligand; each zinc of 1ZAA on its two Cys and two His, the zinc of ACE2 on His374, His378 and Glu402 (its fourth ligand is a water) |
 | Protein-DNA: zinc finger Zif268 on its site (1ZAA), λ repressor-operator (1LMB) with 50 ps of explicit-solvent MD, normal modes, and the FEP path on stand-in windows | run; phosphate salt bridges, base stacking, cation-π and water-mediated contacts found |
 | Python 3.9 and 3.12 on macOS; 3.10, 3.12, 3.13 on Linux, 3.12 on macOS and Windows (CI) | pass |
 | Alliance Canada cluster (narval) login node, no display: fresh virtualenv from the site wheels (numpy 2.4, MDAnalysis 2.10); GROMACS 2025 and 2026 `.tpr`, `.gro`, `topol.top` with and without the GROMACS module loaded, full and protein-only trajectories, `--waters`, normal modes, 2D movie | run; all nine topology/trajectory combinations give the same contacts and residue numbers |
@@ -327,13 +340,17 @@ What does not work, or needs care:
 ## How it works, and what to keep in mind
 
 - **Contacts** are PandaPPI's, with its definitions and cutoffs, computed per frame on the heavy
-  atoms of the two chains. Hydrogen bonds are therefore distance-based (donor-acceptor ≤ 3.5 Å),
-  and water-mediated contacts are not tracked because frames are stripped of solvent. Van der
+  atoms of the two chains. Hydrogen bonds are therefore distance-based (donor-acceptor ≤ 3.5 Å).
+  Water-mediated contacts are found only with `--waters`: without it the frames hold no solvent. Van der
   Waals atom contacts are counted but not drawn, as in PandaPPI.
 - **Occupancy.** A contact is one (type, residue, residue) triple. Its presence over frames is
   smoothed with a rolling mean into an occupancy between 0 and 1, which sets the opacity of its
   line. Its distance is measured in every frame between the two atoms that make it, so the number
   keeps ticking while the line fades.
+- **Contacts to a ring.** Cation-π, CH-π, π-π stacking and amide-aromatic contacts are measured to the
+  centre of the aromatic ring (and of the amide group), not to an atom. The tables leave `atom_a` or `atom_b`
+  empty on that side, the distance is the one to the centre, and the viewer, the 3D movie and the Blender
+  scene draw the line to the centre.
 - **Normal modes** come from an anisotropic network model on Cα atoms (15 Å cutoff). Each residue
   moves rigidly with its Cα along the mode, which is a linear extrapolation: fine for showing which
   contacts a collective motion strains, wrong for large amplitudes (bonds between neighbouring
@@ -347,8 +364,9 @@ What does not work, or needs care:
 - **FEP contacts are geometric.** Alchemical atoms stay in the coordinates while they are being
   switched off, so a contact drawn at high λ means "these atoms still sit close", not "this
   interaction still contributes". Watch what the neighbours do as λ grows.
-- **One chain pair at a time.** For an antibody, run heavy-antigen and light-antigen separately.
-- **Residue numbers** follow PandaPPI (name + number, insertion codes ignored).
+- **Two sides at a time.** A side can hold several chains (`--select "chainID H L" "chainID W"`), but
+  there are always exactly two sides.
+- **Residue numbers** are those of the input file, insertion codes included (Tyr 100A).
 
 ## Citing
 

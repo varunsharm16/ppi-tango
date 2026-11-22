@@ -76,17 +76,17 @@
 <script>__3DMOL__</script>
 <script>
 const D = __DATA__;
-const F = D.nframes, N = D.natoms, A = D.atoms, [CA, CB] = D.chains;
+const F = D.nframes, N = D.natoms, NP = D.npoints, A = D.atoms, [CA, CB] = D.chains;
 const INK = '#424242', COL = {[CA]: '#4DBBD5', [CB]: '#F39B7F'};
 const $ = id => document.getElementById(id);
 const svgEl = (tag, attrs, parent) => { const e = document.createElementNS('http://www.w3.org/2000/svg', tag);
   for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; };
 
-// ---- coordinates: int16, 0.01 Å
+// ---- coordinates: int16, 0.01 Å. Per frame the N atoms, then the centres of rings contacts end on (NP in all)
 const raw = atob(D.coords), bytes = new Uint8Array(raw.length);
 for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
 const xyz = new Int16Array(bytes.buffer);
-const P = (f, i) => { const o = (f * N + i) * 3; return {x: xyz[o] / 100, y: xyz[o + 1] / 100, z: xyz[o + 2] / 100}; };
+const P = (f, i) => { const o = (f * NP + i) * 3; return {x: xyz[o] / 100, y: xyz[o + 1] / 100, z: xyz[o + 2] / 100}; };
 
 function pdbText() {
   const pre = [], suf = [], out = [];
@@ -99,7 +99,7 @@ function pdbText() {
   for (let f = 0; f < F; f++) {
     out.push('MODEL ' + (f + 1));
     for (let i = 0; i < N; i++) {
-      const o = (f * N + i) * 3;
+      const o = (f * NP + i) * 3;
       out.push(pre[i] + (xyz[o] / 100).toFixed(3).padStart(8) + (xyz[o + 1] / 100).toFixed(3).padStart(8) +
                (xyz[o + 2] / 100).toFixed(3).padStart(8) + suf[i]);
     }
@@ -229,8 +229,8 @@ const xL = 118, xR = W - 118;
 const yOf = (i, n) => 52 + (n > 1 ? i * (nRows - 1) / (n - 1) : (nRows - 1) / 2) * rowH;
 const lY = Object.fromEntries(D.left.map((r, i) => [r.res, yOf(i, D.left.length)]));
 const rY = Object.fromEntries(D.right.map((r, i) => [r.res, yOf(i, D.right.length)]));
-svgEl('text', {x: xL, y: 24, 'text-anchor': 'end', 'font-size': 16, 'font-weight': 'bold', fill: COL[CA]}, map).textContent = 'Chain ' + CA;
-svgEl('text', {x: xR, y: 24, 'text-anchor': 'start', 'font-size': 16, 'font-weight': 'bold', fill: COL[CB]}, map).textContent = 'Chain ' + CB;
+svgEl('text', {x: xL, y: 24, 'text-anchor': 'end', 'font-size': 16, 'font-weight': 'bold', fill: COL[CA]}, map).textContent = D.sides[0];
+svgEl('text', {x: xR, y: 24, 'text-anchor': 'start', 'font-size': 16, 'font-weight': 'bold', fill: COL[CB]}, map).textContent = D.sides[1];
 const edgeLayer = svgEl('g', {}, map), nodeLayer = svgEl('g', {}, map);
 const edges = [], pairCount = {}, pairSeen = {};
 D.contacts.forEach(c => { if (c.drawn) pairCount[c.ra + '|' + c.rb] = (pairCount[c.ra + '|' + c.rb] || 0) + 1; });
@@ -354,8 +354,8 @@ function toggle() {
 
 // ---- wiring
 $('title').textContent = D.title; document.title = D.title;
-$('bA').textContent = 'From ' + CA; $('bB').textContent = 'From ' + CB;
-$('lA').textContent = 'chain ' + CA; $('lB').textContent = 'chain ' + CB;
+$('bA').textContent = 'From ' + D.sides[0]; $('bB').textContent = 'From ' + D.sides[1];
+$('lA').textContent = D.sides[0]; $('lB').textContent = D.sides[1];
 $('lA').style.color = COL[CA]; $('lB').style.color = COL[CB];
 $('scrub').max = F - 1;
 $('play').onclick = toggle;

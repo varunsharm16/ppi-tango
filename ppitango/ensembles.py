@@ -35,8 +35,11 @@ class Ensemble:
     notes: List[str] = field(default_factory=list)
     waters: Optional[list] = None  # per frame: oxygen positions of the waters between the two sides
     log: List[str] = field(default_factory=list)     # what was decided while reading (chains found, box handling)
+    sides: tuple = ()              # what the two sides are called: ('Chain A', 'Chain D'), ('Chain C', 'Chains A+B')
 
     def __post_init__(self):
+        if not self.sides:
+            self.sides = tuple(f'Chain {c}' for c in self.chains)
         if 'resid' not in self.atoms:      # the name a residue is shown by; `resnum` is what the PDB frames carry
             self.atoms = self.atoms.assign(resid=self.atoms.resnum.astype(str))
         if 'kind' not in self.atoms:
@@ -50,6 +53,15 @@ class Ensemble:
     @property
     def n_frames(self) -> int:
         return len(self.coords)
+
+    @property
+    def pair(self) -> str:
+        """The two sides in a sentence: 'chains A and D', 'chain C and chains A+B'."""
+        a, b = self.sides
+        if a.startswith('Chain ') and b.startswith('Chain '):
+            return f'chains {a[6:]} and {b[6:]}'
+        lower = lambda s: s[0].lower() + s[1:] if s.startswith('Chain') else s
+        return f'{lower(a)} and {lower(b)}'
 
     def pdb(self, frame: int) -> str:
         """One frame as PDB text."""
@@ -158,8 +170,8 @@ def read_pdb(path: str, chains: Optional[Sequence[str]] = None, all_models: bool
 def pick_chains(path: str, chains: Optional[Sequence[str]]) -> tuple:
     """The two chains to follow: the ones asked for, or the pair with the most atoms in contact."""
     if chains:
-        if len(chains) != 2:
-            raise ValueError('Give exactly two chains, e.g. --chains A D')
+        if len(chains) != 2 or chains[0] == chains[1]:
+            raise ValueError('Give two different chains, e.g. --chains A D')
         return tuple(chains)
     atoms, coords, _ = read_pdb(path)
     ids = list(dict.fromkeys(atoms.chain))
@@ -236,10 +248,12 @@ def nma(pdb: str, chains: Optional[Sequence[str]] = None, mode: int = 1, rmsd: f
     with its node, and the mode is scaled so the node RMSD from the starting structure peaks at `rmsd` Å.
     `pdb` is a PDB file; with `select`, or for any other structure file, it is read through MDAnalysis.
     """
-    log = []
+    log, sides = [], ()
+    if mode < 1:
+        raise ValueError(f'--mode counts from 1 (the slowest mode); got {mode}')
     if select or renumber or not (_plain_pdb(pdb) or (chains and pdb.lower().endswith(('.pdb', '.ent')))):
         u = _universe(pdb, None)
-        atoms, index, (a, b), log = _sides(u, chains, select, renumber)
+        atoms, index, (a, b), log, sides = _sides(u, chains, select, renumber)
         xyz = u.atoms.positions[index].astype(float)
         box = u.trajectory.ts.dimensions
         if box is not None and box[:3].min() > 0:
@@ -260,7 +274,10 @@ def nma(pdb: str, chains: Optional[Sequence[str]] = None, mode: int = 1, rmsd: f
     gone = [c for c in (a, b) if not (atoms.chain == c).any()]
     if gone:
         raise ValueError(f"Chain {' and '.join(gone)} has no Cα or C4' atoms to build the elastic network on")
-    vals, modes = anm_modes(xyz[is_node], cutoff, n_modes=max(mode, 1))
+    if mode > 3 * is_node.sum() - 6:
+        raise ValueError(f'--mode {mode}: the elastic network of {is_node.sum()} residues has '
+                         f'{3 * is_node.sum() - 6} modes')
+    vals, modes = anm_modes(xyz[is_node], cutoff, n_modes=mode)
     disp = modes[mode - 1]
     disp = disp / np.sqrt((disp ** 2).sum(-1).mean()) * rmsd      # node RMSD = rmsd at full swing
     per_atom = disp[res_key.map(node_of).values]
@@ -268,7 +285,7 @@ def nma(pdb: str, chains: Optional[Sequence[str]] = None, mode: int = 1, rmsd: f
     stack = xyz[None] + np.sin(2 * np.pi * phase)[:, None, None] * per_atom[None]
     nodes = "Cα" + (" and C4'" if (atoms.name == "C4'").any() else '')
     return Ensemble(atoms, stack, (a, b), x=phase, xlabel=f'Phase of normal mode {mode} (cycles)', kind='nma',
-                    title=f'{_name(pdb)} · normal mode {mode}', periodic=True, log=log,
+                    title=f'{_name(pdb)} · normal mode {mode}', periodic=True, log=log, sides=sides,
                     notes=[f'Elastic network model ({nodes}, {cutoff:g} Å cutoff), mode {mode}, ±{rmsd:g} Å RMSD'])
 
 
@@ -541,18 +558,31 @@ def _groups(u) -> list:
     return [(what, np.where(mask)[0]) for what, mask in out]
 
 
-def _fits(u) -> bool:
-    """Do the coordinates fit the topology? Bonded backbone atoms (N-CA, C4'-C3') sit about 1.5 Å apart."""
+BONDED = (('N', 'CA'), ('CA', 'C'), ('C', 'O'), ('CA', 'CB'), ("C4'", "C3'"), ("C1'", "C2'"), ('P', "O5'"),
+          ('C4*', 'C3*'), ('C1*', 'C2*'), ('P', 'O5*'))
+
+
+def _misfit(u) -> Optional[str]:
+    """Do the coordinates fit the topology? Bonded atoms of a residue sit 1.2 to 1.6 Å apart. Returns None when
+    they do, else the bond that does not. Several bonds are looked at, at both ends of the residue: programs
+    order the atoms within a residue differently (GROMACS puts C and O last, OpenMM and the PDB before the side
+    chain), so the first atoms alone can sit where they should while the rest do not."""
     names, resix = _attr(u.atoms, 'names'), u.atoms.resindices
     xyz = u.atoms.positions
-    for one, two in (('N', 'CA'), ("C4'", "C3'"), ('C4*', 'C3*')):
+    for one, two in BONDED:
         i, j = np.where(names == one)[0], np.where(names == two)[0]
         both = np.intersect1d(resix[i], resix[j])
         if len(both) >= 3:
             i, j = i[np.isin(resix[i], both)][:300], j[np.isin(resix[j], both)][:300]
             if len(i) == len(j):
-                return bool(1.2 < np.median(np.linalg.norm(xyz[i] - xyz[j], axis=1)) < 1.8)
-    return True   # no backbone to judge by
+                d = float(np.median(np.linalg.norm(xyz[i] - xyz[j], axis=1)))
+                if not 1.0 < d < 1.9:
+                    return f'the bonded atoms {one} and {two} are {d:.1f} Å apart in it'
+    return None   # no bond to judge by
+
+
+def _fits(u) -> bool:
+    return _misfit(u) is None
 
 
 def _reconcile(mda, u, traj: str, n_traj: int, notes: list):
@@ -586,10 +616,11 @@ def _reconcile(mda, u, traj: str, n_traj: int, notes: list):
                  chain_ids=None if chain_ids is None else np.r_[chain_ids, np.full(pad, '')],
                  icodes=None if icodes is None else np.r_[icodes[a.resindices], np.full(pad, '')])
     big.load_new(traj)
-    if not _fits(big):
+    wrong = _misfit(big)
+    if wrong:
         raise ValueError(f'the trajectory holds {n_traj} atoms and the topology {n_top}, and the topology does '
-                         'not describe the first atoms of the trajectory. Write the topology for the same atoms '
-                         'as the trajectory')
+                         f'not describe the first atoms of the trajectory: {wrong}. Write the topology for the '
+                         'same atoms as the trajectory')
     notes.append(f'{tname} holds {n_traj} atoms, the topology {n_top}: the topology was taken to describe the '
                  f'first {n_top} atoms of the trajectory (waters cannot be followed this way)')
     return big
@@ -605,6 +636,10 @@ def _universe(top: str, traj: Optional[str]):
     for f in (top, traj):
         if f and not os.path.exists(f):
             raise FileNotFoundError(f'No such file: {f}')
+        if f and os.path.isdir(f):
+            raise ValueError(f'{f} is a folder, not a file')
+        if f and not os.path.getsize(f):
+            raise ValueError(f'{f} is empty')
     if _is_gromacs_top(top) and not traj:
         raise ValueError(f'{os.path.basename(top)} lists the atoms but holds no coordinates: give a trajectory '
                          'with it, or the .gro or .tpr instead')
@@ -618,6 +653,12 @@ def _universe(top: str, traj: Optional[str]):
                 u = _reconcile(mda, u, traj, n_traj, notes)
             elif traj:
                 u.load_new(traj)
+                wrong = _misfit(u)
+                if wrong:
+                    raise ValueError(
+                        f'the trajectory has as many atoms as the topology ({n_traj}) but does not belong to it: '
+                        f'{wrong}. The two files list the atoms in a different order (written by different '
+                        'programs?) or are different systems. Give the topology the trajectory was run with')
         except Exception as e:
             raise ValueError(f'Could not read {top}' + (f' with {traj}' if traj else '') +
                              f': {str(e).rstrip(".")}.') from e
@@ -747,7 +788,8 @@ def _closest_pair(atoms: pd.DataFrame, xyz: np.ndarray, box) -> tuple:
 
 
 def _sides(u, chains, select, renumber=None):
-    """Which atoms make up side a and side b. Returns (atoms, index, (a, b), log)."""
+    """Which atoms make up side a and side b. Returns (atoms, index, (a, b), log, sides): `sides` is what to
+    call the two when they are not one chain each (several chains, a ligand, an ion), else ()."""
     log = list(getattr(u, '_ppitango_notes', []))
     chosen = []
     if select:
@@ -781,21 +823,35 @@ def _sides(u, chains, select, renumber=None):
         picked = [np.where(atoms.kind == k)[0].tolist() for k in ('protein', 'nucleic')]
         log += [table, 'Protein with nucleic acid: side A is all protein chains, side B all nucleic acid chains '
                        '(choose others with --chains or --select)']
+    sides = ()
     if picked:
         rows = picked[0] + picked[1]
         atoms, index = atoms.iloc[rows].reset_index(drop=True), index[rows]
         atoms['part'] = atoms.chain          # the chain each atom came from: a side may hold several
+        # in the frames PandaPPI reads the two sides are chains A and B, whatever the file calls their chains
         atoms['chain'] = ['A'] * len(picked[0]) + ['B'] * len(picked[1])
         a, b = 'A', 'B'
+        sides = []
+        for c in (a, b):
+            side = atoms[atoms.chain == c]
+            parts = list(dict.fromkeys(side.part))
+            if (side.kind == 'other').all():     # a ligand or ions: by residue name
+                names = list(dict.fromkeys(side.resname))
+                sides.append(' + '.join(names) if len(names) <= 3 else f'{len(names)} kinds of residues')
+            else:
+                sides.append(f'Chain {parts[0]}' if len(parts) == 1 else
+                             f"Chains {'+'.join(parts)}" if len(parts) <= 4 else f'{len(parts)} chains')
+        sides = tuple(sides)
+        log.append(f'Side A is {sides[0]} of the file, side B is {sides[1]}: the tables call them A and B')
     else:
         present = list(dict.fromkeys(atoms.chain))
         if chains:
-            if len(chains) != 2:
-                raise ValueError('Give exactly two chains, e.g. --chains A D')
+            if len(chains) != 2 or chains[0] == chains[1]:
+                raise ValueError('Give two different chains, e.g. --chains A D')
             a, b = chains
             missing = [c for c in (a, b) if c not in present]
-            if missing or a == b:
-                raise ValueError(f'Chain {" and ".join(missing) or a} not found.\n{table}\n'
+            if missing:
+                raise ValueError(f'Chain {" and ".join(missing)} not found.\n{table}\n'
                                  'Pick two of these with --chains, or describe the two sides with --select.')
         else:
             a, b = _closest_pair(atoms, u.atoms.positions[index].astype(float), u.trajectory.ts.dimensions)
@@ -812,7 +868,7 @@ def _sides(u, chains, select, renumber=None):
         if (atoms.resid[side].str.contains(':')).any():
             log.append(f'Side {c} holds several chains: its residues are named chain:number '
                        f'({atoms.resid[side].iloc[0]} ... {atoms.resid[side].iloc[-1]})')
-    return atoms.drop(columns='segid'), index, (a, b), log
+    return atoms.drop(columns='segid'), index, (a, b), log, sides
 
 
 def _whole(xyz: np.ndarray, unit: np.ndarray, box: np.ndarray) -> np.ndarray:
@@ -871,8 +927,8 @@ def _read_trajectory(top: str, traj: Optional[str], chains, stride: int = 1, max
                      select=None, renumber=None, waters: bool = False):
     """Coordinates of the two sides from a multi-model PDB, or from topology + trajectory (MDAnalysis).
 
-    Returns (atoms, coords, (a, b), times, log, waters); `times` is in ps when the trajectory stores them, else
-    None; `waters` is a list of oxygen positions per frame when asked for, else None.
+    Returns (atoms, coords, (a, b), times, log, waters, sides); `times` is in ps when the trajectory stores them,
+    else None; `waters` is a list of oxygen positions per frame when asked for, else None.
     """
     if traj is None and not (select or renumber or waters) and \
             (_plain_pdb(top) or (chains and top.lower().endswith(('.pdb', '.ent')))):
@@ -882,10 +938,10 @@ def _read_trajectory(top: str, traj: Optional[str], chains, stride: int = 1, max
         if max_frames and len(keep) > max_frames:
             keep = keep[np.linspace(0, len(keep) - 1, max_frames).round().astype(int)]
         order = np.r_[np.where(atoms.chain == a)[0], np.where(atoms.chain == b)[0]]
-        return atoms.iloc[order].reset_index(drop=True), coords[keep][:, order], (a, b), None, [], None
+        return atoms.iloc[order].reset_index(drop=True), coords[keep][:, order], (a, b), None, [], None, ()
     import warnings
     u = _universe(top, traj)
-    atoms, index, (a, b), log = _sides(u, chains, select, renumber)
+    atoms, index, (a, b), log, sides = _sides(u, chains, select, renumber)
     found = None
     if waters:
         names, resnames = _attr(u.atoms, 'names'), _attr(u.atoms, 'resnames')
@@ -917,11 +973,11 @@ def _read_trajectory(top: str, traj: Optional[str], chains, stride: int = 1, max
     if unwrapped:
         log.append('Periodic box: chains were made whole and put back next to each other')
     times = np.array(times, dtype=float)
-    timed = u.trajectory.format in TIMED and len(times) > 1 and (np.diff(times) > 0).all()
+    timed = bool(set(np.atleast_1d(u.trajectory.format)) & set(TIMED)) and len(times) > 1 and (np.diff(times) > 0).all()
     if waters:
         log.append(f'Interface waters: {np.mean([len(w) for w in found]):.1f} per frame on average sit within '
                    '3.5 Å of both sides')
-    return atoms, np.array(frames), (a, b), times if timed else None, log, found
+    return atoms, np.array(frames), (a, b), times if timed else None, log, found, sides
 
 
 def _fit_atoms(atoms: pd.DataFrame) -> np.ndarray:
@@ -942,8 +998,8 @@ def md(top: str, traj: Optional[str] = None, chains: Optional[Sequence[str]] = N
     between saved frames in `unit`; left out, the times stored in the trajectory are used (xtc, trr, nc), or
     the axis counts frames.
     """
-    atoms, coords, (a, b), times, log, wat = _read_trajectory(top, traj, chains, stride, max_frames, select,
-                                                              renumber, waters)
+    atoms, coords, (a, b), times, log, wat, sides = _read_trajectory(top, traj, chains, stride, max_frames,
+                                                                     select, renumber, waters)
     if dt is not None:
         x, xlabel = _frame_numbers(top, traj, stride, max_frames, len(coords)) * dt, f'Time ({unit})'
     elif times is not None:
@@ -954,7 +1010,7 @@ def md(top: str, traj: Optional[str] = None, chains: Optional[Sequence[str]] = N
         log.append('No frame times known: the axis counts frames. Give --dt (time between saved frames) for a '
                    'time axis')
     coords = _superpose(coords, _fit_atoms(atoms), wat)
-    return Ensemble(atoms, coords, (a, b), x=x, xlabel=xlabel, kind='md', waters=wat, log=log,
+    return Ensemble(atoms, coords, (a, b), x=x, xlabel=xlabel, kind='md', waters=wat, log=log, sides=sides,
                     title=f'{_name(traj or top)} · molecular dynamics',
                     notes=[f'{len(coords)} frames over {x[-1] - x[0]:g} {unit}'])
 
@@ -992,9 +1048,8 @@ def fep(top: str, windows: Sequence[str], chains: Optional[Sequence[str]] = None
         np.linspace(0, 1, len(windows))
     for k, w in enumerate(windows):
         is_pdb = w.lower().endswith(('.pdb', '.ent'))
-        atoms, coords, pair, _, log_k, wat_k = _read_trajectory(w if is_pdb else top, None if is_pdb else w,
-                                                                chains, 1, frames_per_window, select, renumber,
-                                                                waters)
+        atoms, coords, pair, _, log_k, wat_k, sides = _read_trajectory(
+            w if is_pdb else top, None if is_pdb else w, chains, 1, frames_per_window, select, renumber, waters)
         if waters:
             wat += wat_k
         chains = chains or (None if select else pair)   # later windows follow the pair found in the first
@@ -1008,6 +1063,7 @@ def fep(top: str, windows: Sequence[str], chains: Optional[Sequence[str]] = None
     x = np.concatenate(lam)
     curve = np.interp(x, lambdas, table['dG'].values) if table is not None else None
     return Ensemble(atoms, coords, pair, x=x, xlabel='λ (alchemical progress)', kind='fep', waters=wat, log=log,
+                    sides=sides,
                     title=f'{_name(top)} · free energy perturbation' + (f' · {label}' if label else ''),
                     curve=curve, curve_label='ΔΔG (kcal/mol)' if table is not None else '',
                     notes=[f'{len(windows)} λ windows, {len(coords)} frames',

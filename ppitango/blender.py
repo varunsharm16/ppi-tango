@@ -182,7 +182,7 @@ def write(scene: Scene, output: str, seconds: float = 12.0) -> str:
     # the models, one per frame: Molecular Nodes keeps them in the file and moves the atoms between them
     with tempfile.TemporaryDirectory() as tmp:
         with open(f'{tmp}/frames.pdb', 'w') as f:
-            f.write(''.join(f'MODEL {i + 1}\n' + _pdb_text(atoms, coords[frame]).replace('END\n', 'ENDMDL\n')
+            f.write(''.join(f'MODEL {i + 1}\n' + _pdb_text(atoms, coords[frame, :len(atoms)]).replace('END\n', 'ENDMDL\n')
                             for i, frame in enumerate(frames)))
         mol = mn.Molecule.load(f'{tmp}/frames.pdb', name='complex', remove_solvent=False)
     if len(mol.object.data.vertices) != len(atoms):

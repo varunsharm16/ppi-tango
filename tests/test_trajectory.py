@@ -230,6 +230,7 @@ def test_metal_ion_as_a_side():
     """A selection without protein in it (here the zinc of ACE2) is followed as it is."""
     ens = ensembles.nma('examples/data/6M0J.pdb', select=['chainID A', 'resname ZN'], frames=2)
     assert ens.atoms[ens.atoms.kind == 'other'].element.tolist() == ['ZN']
+    assert ens.sides == ('Chain A', 'ZN') and ens.pair == 'chain A and ZN'   # named as the file names them
     contacts = analysis.analyze(ens, workers=1, progress=False).contacts
     assert (contacts.type == 'Metal coordination').sum() >= 3
 
@@ -257,3 +258,44 @@ def test_prmtop_residue_numbers(tmp_path):
     notes = []
     ensembles._original_numbers(mda, u, str(top), notes)
     assert u.residues.resids.tolist() == [3, 4, 1] and u.atoms.chainIDs.tolist() == list('AAAADD') and notes
+
+
+def test_trajectory_of_another_setup_is_refused(tmp_path):
+    """The same protein written by another program has its atoms in another order within each residue (here C
+    and O moved behind the side chain, as GROMACS has them): same atom count, wrong atoms."""
+    lines = [l for l in open(TOP) if l.startswith(('ATOM', 'HETATM'))]
+    out, residue = [], []
+    for line in lines + ['']:
+        if residue and line[17:27] != residue[0][17:27]:
+            last = [l for l in residue if l[12:16].strip() in ('C', 'O')]
+            out += [l for l in residue if l not in last] + last
+            residue = []
+        residue.append(line)
+    assert len(out) == len(lines) and out != lines
+    other = tmp_path / 'other.pdb'
+    other.write_text(''.join(out) + 'END\n')
+    with pytest.raises(ValueError, match='as many atoms as the topology.*does not belong to it'):
+        ensembles.md(str(other), TRAJ, chains=['A', 'D'], max_frames=FRAMES)
+
+
+def test_netcdf_times_are_read():
+    ens = ensembles.md('examples/formats/amber/complex.prmtop', 'examples/formats/amber/md.nc', max_frames=3)
+    assert ens.xlabel == 'Time (ps)' and ens.x.tolist() == [0, 10, 20]
+    assert ens.sides == ('Chain A', 'Chain D') and ens.pair == 'chains A and D'
+
+
+def test_ring_contacts_end_on_the_ring_centre():
+    """Cation-π, CH-π, π-π and amide-aromatic contacts name no atom on the ring's side and give the distance to
+    its centre: the scene draws them there, so every drawn distance is the one in the table."""
+    ens = ensembles.md(TOP, TRAJ, chains=['A', 'D'], max_frames=FRAMES)
+    result = analysis.analyze(ens, workers=1, progress=False)
+    scene = result.scene()
+    table = result.contacts.sort_values('distance').drop_duplicates(['frame', 'type', 'residue_a', 'residue_b'])
+    rings = table[(table.atom_a == '') | (table.atom_b == '')]
+    assert set(rings.type) >= {'Cation-pi', 'CH-pi'} and scene.points.shape[1] > len(ens.atoms)
+    index = {(c['type'], c['residue_a'], c['residue_b']): k for k, c in enumerate(scene.contacts)}
+    for row in table.itertuples():
+        k = index[(row.type, row.residue_a, row.residue_b)]
+        assert scene.dist[k, row.frame] == pytest.approx(row.distance, abs=0.011)
+    centres = np.unique(np.r_[scene.atom_a.ravel(), scene.atom_b.ravel()])
+    assert (centres >= len(ens.atoms)).sum() == scene.points.shape[1] - len(ens.atoms)

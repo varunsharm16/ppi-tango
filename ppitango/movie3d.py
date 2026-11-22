@@ -77,7 +77,7 @@ def render(scene: Scene, output: str, seconds: float = 12.0, fps: int = 15, titl
         frames, models, labels = [], [], []
         for i, u in enumerate(us):
             xyz = at(coords, u)
-            models.append(f'MODEL {i + 1}\n' + _pdb_text(ens.atoms, xyz).replace('END\n', 'ENDMDL\n'))
+            models.append(f'MODEL {i + 1}\n' + _pdb_text(ens.atoms, xyz[:len(ens.atoms)]).replace('END\n', 'ENDMDL\n'))
             f0 = int(round(u)) % ens.n_frames                    # contact atoms: those of the nearest frame
             view = _camera(i / (n - 1), reach * 0.8 / TAN_HALF_FOV, near / TAN_HALF_FOV, reach)
             contacts, texts, waters = [], [], []

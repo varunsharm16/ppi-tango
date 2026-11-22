@@ -4,7 +4,10 @@
 #     bash examples/formats/run_all.sh        then        python examples/formats/compare.py
 # Tables only (no movies), about a minute per line on a laptop. Results go to formats_out/.
 G=examples/formats/gromacs; A=examples/formats/amber; C=examples/formats/charmm; O=formats_out
-run() { name=$1; shift; echo "== $name: ppitango md $*"; ppitango md "$@" --no-movie --no-viewer -o $O/$name || echo "FAILED: $name"; }
+rm -rf $O   # tables of an earlier run must not be taken for this one's
+failed=0
+run() { name=$1; shift; echo "== $name: ppitango md $*"
+        ppitango md "$@" --no-movie --no-viewer -o $O/$name || { echo "FAILED: $name"; failed=$((failed + 1)); }; }
 
 # GROMACS: the whole system (37044 atoms: water, ions, dodecahedron box). md.xtc is as mdrun wrote it,
 # both chains cut by the box in every frame; md_whole.xtc is the same after trjconv -pbc mol -center.
@@ -25,3 +28,6 @@ run amber            $A/complex.prmtop $A/md.nc
 run charmm           $C/complex.psf    $C/md.dcd
 # water-mediated contacts on top (needs the water: full topology and full trajectory)
 run waters           $G/md.gro    $G/md.xtc --waters
+
+[ $failed -eq 0 ] || echo "$failed of 12 runs failed"
+exit $failed

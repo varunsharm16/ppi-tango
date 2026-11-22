@@ -66,9 +66,9 @@ def test_contacts_tracked_through_frames(result):
     assert scene.occ.shape == (len(scene.contacts), 6)
     assert scene.occ.min() >= 0 and scene.occ.max() <= 1
     assert scene.drawn and scene.left and scene.right
-    # the distance of a contact is measured between its own two atoms in every frame
+    # the distance of a contact is measured between its own two ends in every frame
     k = scene.drawn[0]
-    xyz = result.ensemble.coords
+    xyz = scene.points
     d = np.linalg.norm(xyz[3, scene.atom_a[k, 3]] - xyz[3, scene.atom_b[k, 3]])
     assert scene.dist[k, 3] == pytest.approx(d)
 
@@ -110,6 +110,20 @@ def test_cli_rejects_single_chain(pdb, tmp_path):
     with pytest.raises(SystemExit) as e:
         main(['nma', str(one)])
     assert 'single chain' in str(e.value)
+
+
+def test_cli_checks_options_before_working(pdb, tmp_path, capsys):
+    from ppitango.cli import main
+    for bad in (['--mode', '0'], ['--fps', '0'], ['--seconds', '0'], ['--frames', '1'], ['--workers', '0']):
+        with pytest.raises(SystemExit) as e:
+            main(['nma', pdb, *bad])
+        assert e.value.code == 2 and 'must be' in capsys.readouterr().err
+    for bad, said in ((['--chains', 'A', 'A'], 'two different chains'), (['--mode', '1000'], 'has 42 modes'),
+                      (['-o', f'{pdb}/x'], 'cannot write to')):
+        with pytest.raises(SystemExit) as e:
+            main(['nma', pdb, *bad])
+        assert said in str(e.value)
+    assert os.listdir(tmp_path) == []
 
 
 def test_version():

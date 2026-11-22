@@ -48,8 +48,9 @@ adds `*_3d.mp4`, `--gif` the GIFs. Our own outputs of these commands are in [`de
 Things to check in them:
 
 - the movies play, and the contact lines on the 2D map fade in and out rather than flicker;
-- the viewer opens offline in a browser, the models move, each contact is drawn between two atoms, and
-  the browser console shows no error;
+- the viewer opens offline in a browser, the models move, each contact is drawn between two atoms (to the
+  centre of the ring for cation-π, CH-π, π-π and amide-aromatic contacts, whose `atom_a` or `atom_b` is
+  empty in the CSV), and the browser console shows no error;
 - a contact drawn in a frame is in the CSV for that frame, with that distance;
 - residue names and numbers are those of the PDB file (barnase Arg 59, Arg 83, Arg 87, His 102; barstar
   Asp 35, Asp 39, Glu 76 are the well-known interface residues and should be there).
@@ -70,8 +71,8 @@ TIP3P), and that run again as other programs and habits leave it:
 | `charmm/complex.psf` + `md.dcd` | CHARMM/NAMD topology with segment names, DCD trajectory |
 
 ```bash
-bash examples/formats/run_all.sh          # twelve runs, tables only, a few minutes
-python examples/formats/compare.py        # exit code 0 if every run agrees with the reference
+bash examples/formats/run_all.sh          # twelve runs, tables only, a few minutes; exit code = runs that failed
+python examples/formats/compare.py        # exit code 0 if every run is there and agrees with the reference
 ```
 
 Every run must find the same 573 contacts between the same residues and atoms in the same frames, with

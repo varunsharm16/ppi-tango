@@ -125,8 +125,9 @@ class Report:
                                         fc=CLASS_COLOR[RESIDUE_CLASS.get(res.split()[0], 'Other')]))
                 mine = [k for k in s.drawn if s.contacts[k][side] == res]
                 self.nodes.append((txt, s.occ[mine].max(0), s.area_of(chain, res)))
-        for chain, x, ha, color in ((a, 0.0, 'right', CHAIN_COLORS[0]), (b, 1.0, 'left', CHAIN_COLORS[1])):
-            ax.text(x, n + 0.1, f'Chain {chain}', ha=ha, va='bottom', fontsize=13, fontweight='bold', color=color)
+        for name, x, ha, color in ((s.ensemble.sides[0], 0.0, 'right', CHAIN_COLORS[0]),
+                                   (s.ensemble.sides[1], 1.0, 'left', CHAIN_COLORS[1])):
+            ax.text(x, n + 0.1, name, ha=ha, va='bottom', fontsize=13, fontweight='bold', color=color)
         ax.set_xlim(-0.32, 1.32)
         ax.set_ylim(-0.8, n + 0.9)
         ax.axis('off')
@@ -194,7 +195,10 @@ class Report:
         self.area_bars = right.barh(range(len(top)), [0] * len(top), height=0.65,
                                     color=[CHAIN_COLORS[0] if s.residues[i][0] == a else CHAIN_COLORS[1] for i in top])
         self.area_series = s.area[top]
-        right.set_yticks(range(len(top)), [f'{s.residues[i][0]}:{_short(s.residues[i][1])}' for i in top])
+        # the chain in front of each residue, unless its name already carries one (a side of several chains)
+        ens = s.ensemble
+        front = {c: side[6:] + ':' if side.startswith('Chain ') else '' for c, side in zip(ens.chains, ens.sides)}
+        right.set_yticks(range(len(top)), [f'{front[s.residues[i][0]]}{_short(s.residues[i][1])}' for i in top])
         right.set_xlim(0, max(self.area_series.max(), 1) * 1.1)
         right.set_title('Most buried residues', loc='left', fontweight='bold', x=-0.95)
         right.set_xlabel('buried (Å²)')

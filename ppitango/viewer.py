@@ -20,11 +20,11 @@ def _view_frame(scene: Scene):
     """Centre and rotation that put chain a left, chain b right, and the interface edge-on."""
     ens = scene.ensemble
     a, b = ens.chains
-    xyz = ens.coords[0]
+    xyz = scene.points[0]
     idx = np.unique(np.concatenate([scene.atom_a.ravel(), scene.atom_b.ravel()])) if len(scene.contacts) \
         else np.arange(len(xyz))
     face = xyz[idx]
-    in_a = (ens.atoms.chain.values[idx] == a)
+    in_a = (scene.point_chain[idx] == a)
     centre = (face[in_a].mean(0) + face[~in_a].mean(0)) / 2
     ex = face[~in_a].mean(0) - face[in_a].mean(0)
     ex /= np.linalg.norm(ex)
@@ -36,9 +36,10 @@ def _view_frame(scene: Scene):
 
 
 def _canonical(scene: Scene) -> np.ndarray:
-    """Coordinates turned so chain a sits left, chain b right, and the interface is seen edge-on."""
+    """Coordinates turned so chain a sits left, chain b right, and the interface is seen edge-on: the atoms, then
+    the centres of the rings and amide groups contacts end on (`Scene.points`)."""
     centre, rot = _view_frame(scene)
-    return (scene.ensemble.coords - centre) @ rot.T
+    return (scene.points - centre) @ rot.T
 
 
 def _bridges(scene: Scene) -> dict:
@@ -62,8 +63,9 @@ def write(scene: Scene, output: str, title: str = '') -> str:
     water = lambda k: [None if np.isnan(p[0]) else r2(p) for p in bridges[k]] if k in bridges else None
     used = [t for t in TYPE_STYLE if any(scene.contacts[k]['type'] == t for k in shown)]
     data = dict(
-        title=title or ens.title, kind=ens.kind, chains=[a, b], xlabel=ens.xlabel, x=r2(ens.x),
+        title=title or ens.title, kind=ens.kind, chains=[a, b], sides=list(ens.sides), xlabel=ens.xlabel, x=r2(ens.x),
         unit=ens.xlabel.split('(')[-1].rstrip(')'), nframes=ens.n_frames, natoms=len(atoms),
+        npoints=scene.points.shape[1],
         atoms=dict(chain=atoms.chain.tolist(), resn=atoms.resname.tolist(), resi=atoms.resnum.tolist(),
                    name=atoms.name.tolist(), elem=atoms.element.tolist()),
         coords=base64.b64encode(coords.tobytes()).decode(),
