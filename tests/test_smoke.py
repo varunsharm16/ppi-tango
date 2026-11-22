@@ -1,4 +1,6 @@
 """End-to-end checks on a small synthetic two-chain complex (no downloads, a few seconds)."""
+import os
+
 import numpy as np
 import pytest
 
@@ -112,3 +114,31 @@ def test_cli_rejects_single_chain(pdb, tmp_path):
 
 def test_version():
     assert ppitango.__version__
+
+
+def test_blender_scene(result, tmp_path):
+    """The scene opens again with every frame in it, and the contacts drawn change as the frames go by."""
+    bpy = pytest.importorskip('bpy')
+    pytest.importorskip('molecularnodes')
+    from ppitango import blender
+    scene = result.scene()
+    path = blender.write(scene, str(tmp_path / 'scene.blend'), seconds=2)
+    assert [p.name for p in tmp_path.iterdir()] == ['scene.blend']
+    import zstandard
+    raw = zstandard.ZstdDecompressor().stream_reader(open(path, 'rb')).read()
+    assert b'site-packages' not in raw and os.path.expanduser('~').encode() not in raw   # no local paths
+    bpy.ops.wm.open_mainfile(filepath=path)
+    world = bpy.context.scene
+    assert (world.frame_start, world.frame_end) == (1, 2 * blender.FPS) and world.camera is not None
+    model = bpy.data.objects['complex']
+    assert len(model.data.vertices) == len(scene.ensemble.atoms)
+    made = (scene.occ[:, 0] >= 0.5).sum()
+    tree = model.modifiers[0].node_group
+    drawn = tree.nodes['Contacts']
+    for other in [n for n in tree.nodes if n.bl_idname == 'GeometryNodeGroup' and n != drawn]:
+        if other.node_tree.name.startswith('Style'):
+            tree.nodes.remove(other)                         # leave the contacts alone on the stage
+    drawn.inputs['Gap (Å)'].default_value = 1000             # one dash per contact
+    world.frame_set(1)
+    mesh = model.evaluated_get(bpy.context.evaluated_depsgraph_get()).to_mesh()
+    assert len(mesh.vertices) == made * 24                   # a 12-sided cylinder each

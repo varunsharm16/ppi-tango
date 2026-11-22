@@ -16,6 +16,7 @@ things you can put in a talk:
 | **2D movie** | `*_contacts.mp4` (`.gif`) | PandaPPI's interaction map, alive: contact lines fade in and out, distances tick, bars and timelines follow along |
 | **Interactive 3D viewer** | `*_viewer.html` | The real models moving, every contact drawn between its two atoms with a live distance, camera presets, a guided tour, and the 2D map in sync. One self-contained file, works offline |
 | **3D movie** | `*_3d.mp4` | Ray-traced models next to the live 2D map; the camera flies in to the interface and around it. Needs PyMOL |
+| **Blender scene** | `*.blend` | The moving complex, its contacts and the camera path as a scene to restyle and render in [Blender](https://www.blender.org). Optional, see [below](#blender-make-it-look-the-way-you-want) |
 | **Tables** | `*_contacts.csv`, `*_buried_surface.csv` | Every contact and every buried residue in every frame |
 
 ## Install
@@ -31,6 +32,14 @@ The 3D movie additionally needs PyMOL, from pip or from conda:
 ```bash
 pip install "ppi-tango[md,movie3d] @ git+https://github.com/varunsharm16/ppi-tango"
 conda install -c conda-forge pymol-open-source      # or this, next to a plain install
+```
+
+The Blender scene needs Blender as a Python module and [Molecular Nodes](https://github.com/BradyAJohnston/MolecularNodes).
+Both exist for Python 3.11 only, so give them an environment of their own:
+
+```bash
+conda create -n ppitango-blender python=3.11 && conda activate ppitango-blender
+pip install "ppi-tango[md,blender] @ git+https://github.com/varunsharm16/ppi-tango"
 ```
 
 ## Use
@@ -119,6 +128,7 @@ contacts that go with it.
 | --- | --- |
 | `--chains A B` | the two chains to follow (default: the pair with most contacts) |
 | `--movie3d` | also render the split-screen 3D movie |
+| `--blender` | also write the Blender scene |
 | `--gif` | also convert the movies to GIF (for READMEs and chat; use the MP4 in slides) |
 | `--smooth N` | rolling window over N frames. Contacts hovering around a cutoff would flicker; this turns flicker into fades (default 5 for MD/FEP, off for normal modes) |
 | `--seconds`, `--fps` | movie length and frame rate |
@@ -126,6 +136,37 @@ contacts that go with it.
 | `--title` | title on the movies and viewer |
 
 `ppitango nma --help` (and `md`, `fep`) lists the rest.
+
+### Blender: make it look the way you want
+
+ppi-tango decides *what* to show (which contacts, when); with `--blender` the *look* is yours:
+
+```bash
+ppitango md top.pdb traj.dcd --chains A D --blender          # writes traj_md.blend next to the rest
+```
+
+![The scene as written, and restyled by a short script](docs/blender.jpg)
+
+*Left: the scene as written. Right: the same file after [`examples/blender_restyle.py`](examples/blender_restyle.py):
+a see-through surface, glowing contacts, a dark backdrop. The whole restyled movie:
+[`demos/barnase_barstar_md_blender_restyled.mp4`](demos/barnase_barstar_md_blender_restyled.mp4).*
+
+The `.blend` file is complete in itself: Blender opens it without ppi-tango, without Molecular Nodes and
+without the trajectory. Press space to play. In it:
+
+| In the scene | What it is | Change it to |
+| --- | --- | --- |
+| object `complex` | all atoms, moving through the frames. Its Geometry Nodes hold the look | |
+| nodes `Style Cartoon`, `Style Ball and Stick` | [Molecular Nodes](https://bradyajohnston.github.io/MolecularNodes/) styles | swap or add styles (surface, ribbon, spheres), change materials. Installing the Molecular Nodes add-on puts all its styles in the Add menu |
+| node `Contacts` | dashed lines between the two atoms of each contact, there while the contact is made; red spheres are bridging waters | radius, dash, gap, occupancy threshold, material |
+| node `Animate Value` | the clock: which frame is shown at which point of the movie | slow down, speed up, loop |
+| attributes `interface`, `interface_side_chains`, `Color` | the residues that make contacts, and the chain colours | select by them in any node |
+| `camera pivot`, `camera` | fly in, rock around the interface, fly out; a key every quarter second | move or delete keys, or fly by hand |
+| world, `light` | white backdrop, one sun that follows the camera | anything |
+
+Render from the Render menu, or without the window: `blender -b scene.blend -a`. The scene is set to EEVEE,
+which draws a frame in about a second; switch to Cycles for ray tracing. Open the file with Blender 5.0
+or newer (the version of the Python module that wrote it).
 
 ### In slides
 
@@ -186,10 +227,11 @@ result = ppitango.analyze(ens)            # PandaPPI on every frame, in parallel
 result.contacts                           # tidy DataFrame: frame, x, type, residue_a, atom_a, residue_b, atom_b, distance
 scene = result.scene(smooth=5)            # per-contact occupancy and distance over frames
 
-from ppitango import movie, viewer, movie3d
+from ppitango import movie, viewer, movie3d, blender
 movie.render(scene, 'contacts.mp4')
 viewer.write(scene, 'viewer.html')
 movie3d.render(scene, '3d.mp4')
+blender.write(scene, 'scene.blend')
 ```
 
 ## Demos
@@ -199,7 +241,7 @@ Open the `*_viewer.html` files in a browser after cloning (GitHub does not rende
 
 | Complex | Motion | Files |
 | --- | --- | --- |
-| Barnase-barstar (1BRS, chains A/D) | 20 ns explicit-solvent MD | `barnase_barstar_md_*` |
+| Barnase-barstar (1BRS, chains A/D) | 20 ns explicit-solvent MD | `barnase_barstar_md_*`, with the Blender scene `barnase_barstar_md.blend` |
 | Barnase-barstar | FEP: barstar Tyr29 side chain switched off over 12 λ windows | `barnase_barstar_fep_*` |
 | Barnase-barstar | normal mode 1 | `barnase_barstar_nma_*` |
 | Fab-VEGF (1BJ1, chains H/W), PandaPPI's own example | normal mode 1 | `fab_vegf_nma_*` |
@@ -266,6 +308,10 @@ What does not work, or needs care:
 - **More than 9999 residues on one side** cannot be written to the PDB frames PandaPPI reads.
 - **3D movie** needs PyMOL and is the slow part (about 3 minutes for a 12 s movie on 8 cores); everything
   else runs headless on a cluster login node without it.
+- **Blender scene**: Python 3.11 only (Blender's own limit). The scene holds the 3D part: no 2D map and no
+  distance labels. It was built, reopened with plain Blender and rendered from scripts on macOS, and is built
+  and reopened on Linux in CI; nobody has clicked through it in the Blender window yet. Up to 200 frames are
+  stored as they are (4 MB for barnase-barstar); very large complexes make large files.
 - **Windows, Linux, macOS**: the tests, the README commands and a 3D movie (PyMOL from pip) run in CI on every
   push, and each run keeps its movie as a download. The three were compared once by eye: same picture, except
   that Linux falls back to another font when Arial is not installed.
@@ -355,6 +401,7 @@ Software ppi-tango reads with or draws with:
   Dictionary of protein secondary structure. *Biopolymers* 22, 2577-2637.
 - 3Dmol.js: Rego N, Koes D (2015). 3Dmol.js: molecular visualization with WebGL. *Bioinformatics* 31, 1322-1324.
 - PyMOL: The PyMOL Molecular Graphics System, Schrödinger, LLC.
+- Molecular Nodes: Johnston B and contributors, github.com/BradyAJohnston/MolecularNodes. Blender: Blender Foundation, blender.org.
 - Matplotlib: Hunter JD (2007). Matplotlib: a 2D graphics environment. *Comput Sci Eng* 9, 90-95.
 
 ## Credits
@@ -362,6 +409,7 @@ Software ppi-tango reads with or draws with:
 Contact detection and the visual language (colours, badges, the map itself) are
 [PandaPPI](https://github.com/pritampanda15/PandaPPI)'s, by Pritam Kumar Panda. The viewer uses
 [3Dmol.js](https://3dmol.csb.pitt.edu) (BSD-3-Clause, bundled in `ppitango/vendor`); the 3D movie
-uses [PyMOL](https://github.com/schrodinger/pymol-open-source). The talk in `slides/` is built on the
+uses [PyMOL](https://github.com/schrodinger/pymol-open-source). The Blender scene is built with
+[Molecular Nodes](https://github.com/BradyAJohnston/MolecularNodes) (not bundled: installed by the `blender` extra). The talk in `slides/` is built on the
 [live slides template](https://github.com/ramithuh/protein-design-interactive-slides) (MIT), which bundles manim-web,
 three.js, Reveal.js and the Lato font with their licences in `slides/vendor`. MIT licence.

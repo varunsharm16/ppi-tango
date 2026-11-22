@@ -22,14 +22,19 @@ def _ease(u):
     return u * u * (3 - 2 * u)
 
 
-def _camera(s: float, d_far: float, d_near: float, reach: float) -> list:
-    """PyMOL view at movie progress s (0..1): overview, fly in, rock to either side of the interface, fly out.
+def _flight(s: float):
+    """The camera at movie progress s (0..1): overview, fly in, rock to either side of the interface, fly out.
+    Returns the turn about the upright axis, the tilt (radians) and how far it has flown in (0..1).
 
     The side-on view keeps the interface in sight; a full turn would park a whole chain in front of it."""
     zoom = _ease((s - 0.08) / 0.17) - _ease((s - 0.88) / 0.12)
     close = np.clip((s - 0.25) / 0.63, 0, 1)
-    theta = np.radians(55) * np.sin(2 * np.pi * close)
-    tilt = np.radians(15) * np.sin(np.pi * close)
+    return np.radians(55) * np.sin(2 * np.pi * close), np.radians(15) * np.sin(np.pi * close), zoom
+
+
+def _camera(s: float, d_far: float, d_near: float, reach: float) -> list:
+    """PyMOL view at movie progress s (0..1)."""
+    theta, tilt, zoom = _flight(s)
     d = d_far + (d_near - d_far) * zoom
     ry = np.array([[np.cos(theta), 0, np.sin(theta)], [0, 1, 0], [-np.sin(theta), 0, np.cos(theta)]])
     rx = np.array([[1, 0, 0], [0, np.cos(tilt), -np.sin(tilt)], [0, np.sin(tilt), np.cos(tilt)]])

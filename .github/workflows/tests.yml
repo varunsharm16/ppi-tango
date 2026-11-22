@@ -42,3 +42,23 @@ jobs:
           name: movie3d-${{ matrix.os }}-${{ matrix.python }}
           path: out/3d_3d.mp4
           retention-days: 14
+
+  blender:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"   # the only one Blender's Python module is built for
+      - run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxi6 libxxf86vm1 libxfixes3 libxrender1 libxkbcommon0 libsm6
+      - run: pip install ".[md,test,blender]"
+      - run: pytest -q
+      - name: Blender scene from the command line
+        run: |
+          ppitango nma examples/data/1BRS.pdb --chains A D --no-movie --no-viewer --seconds 2 --blender -o out/scene
+          ls -la out/scene.blend
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blender-scene
+          path: out/scene.blend
+          retention-days: 14

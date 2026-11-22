@@ -14,7 +14,7 @@ ppitango nma $D/6M0J.pdb --chains A E -o demos/ace2_rbd_nma \
     --title "ACE2–SARS-CoV-2 RBD (6M0J) · normal mode 1" --movie3d
 
 ppitango md $S/md_1brs/top.pdb $S/md_1brs/traj.dcd --chains A D --dt 0.1 -o demos/barnase_barstar_md \
-    --title "Barnase–barstar (1BRS) · 20 ns molecular dynamics" --seconds 16 --movie3d --gif
+    --title "Barnase–barstar (1BRS) · 20 ns molecular dynamics" --seconds 16 --movie3d --gif --blender   # the .blend needs the blender extra (Python 3.11); skipped without
 ppitango fep $S/fep_1brs/top.pdb $S/fep_1brs/window_*.dcd --chains A D --dg $S/fep_1brs/dg.csv --frames-per-window 10 \
     -o demos/barnase_barstar_fep --label "barstar Tyr29 side chain off" \
     --title "Barnase–barstar · FEP: barstar Tyr29 side chain switched off" --seconds 16 --movie3d

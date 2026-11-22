@@ -21,6 +21,9 @@ def _common(p):
     out = p.add_argument_group('outputs (default: 2D movie + interactive viewer + CSV tables)')
     out.add_argument('--movie3d', action='store_true',
                      help='also render the split-screen 3D movie: ray-traced models next to the live 2D map (needs PyMOL)')
+    out.add_argument('--blender', action='store_true',
+                     help='also write a Blender scene (.blend) to restyle and render in Blender: the moving complex, '
+                          'its contacts and a camera path (needs Blender as a Python module and Molecular Nodes)')
     out.add_argument('--gif', action='store_true', help='also convert the movies to GIF')
     out.add_argument('--no-movie', action='store_true', help='skip the 2D movie')
     out.add_argument('--no-viewer', action='store_true', help='skip the interactive HTML viewer')
@@ -132,6 +135,12 @@ def main(argv=None):
         except RuntimeError as e:
             print(f'ppitango: 3D movie skipped: {e}', file=sys.stderr)
     files += movies + ([movie.to_gif(m) for m in movies] if args.gif else [])
+    if args.blender:
+        from . import blender
+        try:
+            files.append(blender.write(scene, f'{prefix}.blend', args.seconds))
+        except RuntimeError as e:
+            print(f'ppitango: Blender scene skipped: {e}', file=sys.stderr)
     print('Wrote:')
     for f in files:
         print(f'  {f}')
