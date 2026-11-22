@@ -256,6 +256,10 @@ demonstration runs, not converged production data: see the notes below.
 
 ## What was tested, and known limits
 
+Want to check these claims yourself, or hunt for bugs? [`TESTING.md`](TESTING.md) is a guide for outside testers,
+and [`examples/formats/`](examples/formats) holds one run saved as GROMACS, Amber and CHARMM/NAMD leave it,
+with a script that runs all of them and checks that they agree.
+
 Version 0.1 was run on the same 195-residue complex as four MD programs write it, and each input had to give
 the contacts of the reference run (`tests/test_trajectory.py` keeps the core of this, and runs on every push):
 

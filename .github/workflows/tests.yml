@@ -31,6 +31,11 @@ jobs:
           ppitango fep examples/simulations/output/fep_1brs/top.pdb examples/simulations/output/fep_1brs/window_*.dcd \
             --chains A D --dg examples/simulations/output/fep_1brs/dg.csv --frames-per-window 3 --seconds 3 -o out/fep
           ls -la out
+      - name: One run in every format (GROMACS, Amber, CHARMM), all must give the same contacts
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: |
+          bash examples/formats/run_all.sh
+          python examples/formats/compare.py
       - name: 3D movie with PyMOL from pip, a ligand side and a zinc side
         run: |
           ppitango nma examples/data/1BRS.pdb --chains A D --movie3d --no-movie --no-viewer --seconds 1 --fps 6 -o out/3d
