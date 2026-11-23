@@ -1,7 +1,9 @@
 """Command line: ppitango nma | md | fep."""
 import argparse
+import math
 import os
 import sys
+import tempfile
 
 from . import __version__, analysis, ensembles
 
@@ -13,11 +15,35 @@ def _number(kind, least=None, above=None):
             value = kind(text)
         except ValueError:
             raise argparse.ArgumentTypeError(f'{text!r} is not a {"whole " if kind is int else ""}number')
+        if not math.isfinite(value):        # float() reads "nan" and "inf"
+            raise argparse.ArgumentTypeError(f'{text!r} is not a number to work with')
         if (least is not None and value < least) or (above is not None and value <= above):
             raise argparse.ArgumentTypeError(f'must be {f"{least} or more" if least is not None else f"more than {above}"}'
                                              f', got {text}')
         return value
     return read
+
+
+class _Parser(argparse.ArgumentParser):
+    """Says what is wrong with an option in one line, without the list of all options in front."""
+    def error(self, message):
+        self.exit(2, f'ppitango: {message} (all options: {self.prog} -h)\n')
+
+
+def _prefix(output, name):
+    """Where the outputs go: `output` is a prefix, or a folder (it exists, or ends in a slash) to put files
+    called after the input in. The folder is made and tried before any work is done."""
+    if output and (output.endswith(('/', os.sep)) or os.path.isdir(output)):
+        output = os.path.join(output, name)
+    prefix = output or name
+    folder = os.path.dirname(os.path.abspath(prefix))
+    try:
+        os.makedirs(folder, exist_ok=True)
+        with tempfile.TemporaryFile(dir=folder):
+            pass
+    except OSError as e:
+        sys.exit(f'ppitango: cannot write to {folder}: {e.strerror}')
+    return prefix
 
 
 def _common(p):
@@ -31,7 +57,9 @@ def _common(p):
     p.add_argument('--chains', nargs=2, metavar=('A', 'B'),
                    help='the two chains whose interface to follow (default: the pair with most contacts; protein against '
                         'nucleic acid when both are there)')
-    p.add_argument('-o', '--output', default=None, help='output prefix (default: name of the input file, then _nma, _md or _fep)')
+    p.add_argument('-o', '--output', default=None,
+                   help='output prefix, or a folder (default: name of the input file, then _nma, _md or _fep; '
+                        'for md the input file is the trajectory)')
     out = p.add_argument_group('outputs (default: 2D movie + interactive viewer + CSV tables)')
     out.add_argument('--movie3d', action='store_true',
                      help='also render the split-screen 3D movie: ray-traced models next to the live 2D map (needs PyMOL)')
@@ -56,7 +84,7 @@ def _common(p):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog='ppitango', description='ppi-tango: animated protein-protein interface contacts '
                                      'from normal modes, molecular dynamics and free energy perturbation.')
     parser.add_argument('--version', action='version', version=f'ppi-tango {__version__}')
@@ -83,7 +111,8 @@ def main(argv=None):
     p.add_argument('--max-frames', type=_number(int, 2), default=200, help='analyse at most this many frames (default: 200)')
     p.add_argument('--dt', type=_number(float, above=0), default=None,
                    help='time between saved frames (default: the times stored in the trajectory, else frame numbers)')
-    p.add_argument('--unit', default='ns', help='unit of --dt (default: ns)')
+    p.add_argument('--unit', default='ns', choices=('fs', 'ps', 'ns', 'us', 'µs', 'ms'),
+                   help='unit of --dt: fs, ps, ns, us (or µs), ms (default: ns)')
     _common(p)
 
     p = sub.add_parser('fep', help='walk through the lambda windows of an alchemical calculation',
@@ -101,11 +130,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     source = args.pdb if args.command == 'nma' else args.topology if args.command == 'fep' else \
         args.trajectory or args.topology
-    prefix = args.output or f'{os.path.splitext(os.path.basename(source))[0]}_{args.command}'
-    try:
-        os.makedirs(os.path.dirname(os.path.abspath(prefix)), exist_ok=True)
-    except OSError as e:
-        sys.exit(f'ppitango: cannot write to {os.path.dirname(os.path.abspath(prefix))}: {e.strerror}')
+    prefix = _prefix(args.output, f'{os.path.splitext(os.path.basename(source))[0]}_{args.command}')
     try:
         try:
             renumber = {c: int(n) for c, n in (item.split(':') for item in args.renumber)} or None
@@ -124,6 +149,13 @@ def main(argv=None):
         sys.unraisablehook = lambda *_: None   # a reader that could not open its file complains again when dropped
         sys.exit(f'ppitango: {e}')
 
+    try:
+        _work(args, ens, prefix)
+    except OSError as e:
+        sys.exit(f'ppitango: {e.strerror or e}' + (f': {e.filename}' if e.filename else ''))
+
+
+def _work(args, ens, prefix):
     a, b = ens.chains
     for line in ens.log:
         print(line)

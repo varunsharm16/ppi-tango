@@ -51,7 +51,8 @@ ppitango nma 1BRS.pdb --chains A D
 ```
 
 The elastic network model is built in: no other program needed. `--mode 2` picks another mode,
-`--rmsd 1.5` a larger swing.
+`--rmsd 1.5` a larger swing. Outputs are named after the input (`1BRS_nma_contacts.mp4`, ...) and land in the
+current folder; `-o out/` puts them in a folder, `-o out/run1` also names them.
 
 ### Molecular dynamics: a topology and a trajectory
 
@@ -112,8 +113,11 @@ trajectory (xtc, trr, dcd, nc ...). Nothing needs preparing by hand:
   `--dt` (time between saved frames, with `--unit`), or the axis counts frames.
 - **Topology and trajectory must be of the same run.** The same protein set up by two programs lists its
   atoms in a different order (GROMACS puts a residue's C and O last, OpenMM and the PDB before the side
-  chain), and coordinates would then land on the wrong atoms. ppi-tango checks bond lengths along the
-  backbone and to Cβ in the first frame and stops when they are off.
+  chain), and coordinates would then land on the wrong atoms. ppi-tango measures the bonds of the
+  backbone and of every side chain in the trajectory and stops when they are off, also when an amide oxygen
+  and nitrogen (Asn, Gln) or the oxygen and methyl group of Thr have changed places. It cannot see atoms
+  swapped within a symmetric group (the two oxygens of Asp or Glu, the ring sides of Phe and Tyr, the methyl
+  groups of Val and Leu, the end nitrogens of Arg) or a flipped His ring: the bond lengths are the same.
 - **Long trajectories**: 200 evenly spaced frames are analysed (`--max-frames`, `--stride`), and only those
   are read, so trajectory length hardly matters.
 
@@ -294,6 +298,8 @@ the contacts of the reference run (`tests/test_trajectory.py` keeps the core of 
 
 What does not work, or needs care:
 
+- **Cα-only and coarse-grained models** are not read: a residue is recognised by its N and CA atoms (or a
+  sugar C4'), and the contacts need all heavy atoms.
 - **A trajectory for an unusual part of the system.** A trajectory and a topology with different atom
   counts are matched up as described above. A custom index group (one chain of several, a hand-picked
   region) is not recognised and stops with an error saying both counts: write the topology for that group

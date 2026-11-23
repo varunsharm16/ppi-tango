@@ -278,6 +278,76 @@ def test_trajectory_of_another_setup_is_refused(tmp_path):
         ensembles.md(str(other), TRAJ, chains=['A', 'D'], max_frames=FRAMES)
 
 
+def _renamed(path, change, only=None):
+    """TOP with the atom names of every residue (of the kinds in `only`) handed round by `change`: the
+    coordinates of the trajectory then land on other atoms of the same residue."""
+    out, residue = [], []
+    for line in [l for l in open(TOP) if l.startswith(('ATOM', 'HETATM'))] + ['']:
+        if residue and line[17:27] != residue[0][17:27]:
+            names = [(l[12:16], l[76:78]) for l in residue]
+            new = change(names) if only is None or residue[0][17:20] in only else names
+            out += [l[:12] + a + l[16:76] + e + l[78:] for l, (a, e) in zip(residue, new)]
+            residue = []
+        residue.append(line)
+    path.write_text(''.join(out) + 'END\n')
+    return str(path)
+
+
+def _swap(one, two):
+    def change(names):
+        bare = [n.strip() for n, _ in names]
+        i, j = bare.index(one), bare.index(two)
+        names = list(names)
+        names[i], names[j] = names[j], names[i]
+        return names
+    return change
+
+
+def _reverse_side_chain(names):
+    """Heavy atoms after CB in reverse order, backbone untouched."""
+    bare = [n.strip() for n, _ in names]
+    if 'CB' not in bare:
+        return names
+    side = [k for k in range(bare.index('CB') + 1, len(bare))
+            if not bare[k].startswith('H') and bare[k] not in ('C', 'O', 'OXT')]
+    names = list(names)
+    for k, value in zip(side, [names[k] for k in reversed(side)]):
+        names[k] = value
+    return names
+
+
+@pytest.mark.parametrize('change, only, said', [
+    (_reverse_side_chain, None, 'the bonded atoms CB and CG of'),
+    (_swap('NE', 'NH1'), ('ARG',), 'the bonded atoms CD and NE of ARG'),
+    (_swap('OD1', 'ND2'), ('ASN',), 'OD1 and ND2 have changed places'),
+    (_swap('OE1', 'NE2'), ('GLN',), 'OE1 and NE2 have changed places'),
+    (_swap('OG1', 'CG2'), ('THR',), 'OG1 and CG2 have changed places'),
+])
+def test_side_chains_in_another_order_are_refused(tmp_path, change, only, said):
+    """Backbone and CB in place, the atoms beyond them not: only the side-chain bonds tell."""
+    other = _renamed(tmp_path / 'other.pdb', change, only)
+    with pytest.raises(ValueError, match=f'does not belong to it: .*{said}'):
+        ensembles.md(other, TRAJ, chains=['A', 'D'], max_frames=FRAMES)
+
+
+def test_force_field_files_pass_the_side_chain_check():
+    """GROMACS, Amber and CHARMM topologies name residues and atoms their own way (HIE, CYX, ILE CD)."""
+    for top, traj in (('gromacs/md.gro', 'gromacs/md.xtc'), ('amber/complex.prmtop', 'amber/md.nc'),
+                      ('charmm/complex.psf', 'charmm/md.dcd')):
+        u = ensembles._universe(f'examples/formats/{top}', f'examples/formats/{traj}')
+        assert ensembles._misordered(u) is None and u.trajectory.frame == 0
+
+
+def test_pdb_without_chain_ids_gets_its_chains_lettered(tmp_path):
+    """`nma` and a multi-model PDB through `md` letter the chains as a topology with a trajectory does."""
+    lines = [l[:21] + ' ' + l[22:] if l.startswith(('ATOM', 'TER')) and len(l) > 22 else l for l in open(TOP)]
+    bare = tmp_path / 'bare.pdb'
+    bare.write_text(''.join(lines))
+    ens = ensembles.nma(str(bare), frames=4)
+    assert ens.chains == ('A', 'B') and any('lettered' in line for line in ens.log)
+    assert ensembles.nma(str(bare), chains=['A', 'B'], frames=4).coords.shape == ens.coords.shape
+
+
 def test_netcdf_times_are_read():
     ens = ensembles.md('examples/formats/amber/complex.prmtop', 'examples/formats/amber/md.nc', max_frames=3)
     assert ens.xlabel == 'Time (ps)' and ens.x.tolist() == [0, 10, 20]

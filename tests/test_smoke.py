@@ -123,7 +123,39 @@ def test_cli_checks_options_before_working(pdb, tmp_path, capsys):
         with pytest.raises(SystemExit) as e:
             main(['nma', pdb, *bad])
         assert said in str(e.value)
+    for bad in (['--seconds', 'nan'], ['--rmsd', 'inf'], ['--distance-cutoff', 'nan']):
+        with pytest.raises(SystemExit) as e:
+            main(['nma', pdb, *bad])
+        err = capsys.readouterr().err
+        assert e.value.code == 2 and err.startswith('ppitango: ') and err.count('\n') == 1
+    with pytest.raises(SystemExit) as e:
+        main(['md', pdb, '--unit', 'parsecs'])
+    assert e.value.code == 2 and 'invalid choice' in capsys.readouterr().err
+    with pytest.raises(SystemExit) as e:
+        main(['fep', pdb, pdb, '--dg', str(tmp_path / 'none.csv')])
+    assert 'none.csv' in str(e.value)
     assert os.listdir(tmp_path) == []
+
+
+def test_cli_output_folder(pdb, tmp_path, capsys):
+    """-o takes a prefix or a folder; a folder that cannot be written stops the run before the analysis."""
+    from ppitango.cli import main
+    name = os.path.splitext(os.path.basename(pdb))[0]
+    main(['nma', pdb, '--frames', '4', '--no-movie', '--no-viewer', '-o', f'{tmp_path}/new/'])
+    assert sorted(os.listdir(tmp_path / 'new')) == [f'{name}_nma_buried_surface.csv', f'{name}_nma_contacts.csv']
+    main(['nma', pdb, '--frames', '4', '--no-movie', '--no-viewer', '-o', str(tmp_path / 'new')])
+    assert len(os.listdir(tmp_path / 'new')) == 2 and os.listdir(tmp_path) == ['new']
+    locked = tmp_path / 'locked'
+    locked.mkdir()
+    locked.chmod(0o555)
+    try:
+        if not os.access(locked, os.W_OK):      # not so as root, or on Windows
+            capsys.readouterr()
+            with pytest.raises(SystemExit) as e:
+                main(['nma', pdb, '-o', f'{locked}/x'])
+            assert 'cannot write to' in str(e.value) and 'analysed' not in capsys.readouterr().out
+    finally:
+        locked.chmod(0o755)
 
 
 def test_version():

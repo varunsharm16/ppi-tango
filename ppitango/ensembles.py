@@ -188,13 +188,17 @@ def pick_chains(path: str, chains: Optional[Sequence[str]]) -> tuple:
     return pair
 
 
-def _plain_pdb(path: str) -> bool:
-    """A PDB file the built-in reader is enough for: protein chains only (nucleic acids go through MDAnalysis,
-    which sorts chains into protein and nucleic acid sides)."""
+def _plain_pdb(path: str, chains=None) -> bool:
+    """A PDB file the built-in reader is enough for: protein chains with chain IDs. Nucleic acids go through
+    MDAnalysis, which sorts chains into protein and nucleic acid sides, unless the two chains are named; a file
+    without chain IDs always does, to have its chains lettered."""
     if not path.lower().endswith(('.pdb', '.ent')):
         return False
     with open(path, errors='replace') as f:
-        return not any(line.startswith('ATOM') and line[12:16].strip() in ("C4'", 'C4*') for line in f)
+        atoms = [line for line in f if line.startswith('ATOM')]
+    if any(not line[21:22].strip() for line in atoms):
+        return False
+    return bool(chains) or not any(line[12:16].strip() in ("C4'", 'C4*') for line in atoms)
 
 
 def _superpose(coords: np.ndarray, sel: np.ndarray, extras: Optional[list] = None) -> np.ndarray:
@@ -251,7 +255,7 @@ def nma(pdb: str, chains: Optional[Sequence[str]] = None, mode: int = 1, rmsd: f
     log, sides = [], ()
     if mode < 1:
         raise ValueError(f'--mode counts from 1 (the slowest mode); got {mode}')
-    if select or renumber or not (_plain_pdb(pdb) or (chains and pdb.lower().endswith(('.pdb', '.ent')))):
+    if select or renumber or not _plain_pdb(pdb, chains):
         u = _universe(pdb, None)
         atoms, index, (a, b), log, sides = _sides(u, chains, select, renumber)
         xyz = u.atoms.positions[index].astype(float)
@@ -585,6 +589,89 @@ def _fits(u) -> bool:
     return _misfit(u) is None
 
 
+_RING = [('CB', 'CG', 1.51), ('CG', 'CD1', 1.39), ('CG', 'CD2', 1.39), ('CD1', 'CE1', 1.39), ('CD2', 'CE2', 1.39),
+         ('CE1', 'CZ', 1.39), ('CE2', 'CZ', 1.39)]
+# bonds of the side chains beyond CB, with their usual length in Å (PDB atom names)
+SIDE_BONDS = {
+    'ARG': [('CB', 'CG', 1.52), ('CG', 'CD', 1.52), ('CD', 'NE', 1.46), ('NE', 'CZ', 1.33), ('CZ', 'NH1', 1.33),
+            ('CZ', 'NH2', 1.33)],
+    'ASN': [('CB', 'CG', 1.52), ('CG', 'OD1', 1.23), ('CG', 'ND2', 1.33)],
+    'ASP': [('CB', 'CG', 1.52), ('CG', 'OD1', 1.25), ('CG', 'OD2', 1.25)],
+    'CYS': [('CB', 'SG', 1.81)],
+    'GLN': [('CB', 'CG', 1.52), ('CG', 'CD', 1.52), ('CD', 'OE1', 1.23), ('CD', 'NE2', 1.33)],
+    'GLU': [('CB', 'CG', 1.52), ('CG', 'CD', 1.52), ('CD', 'OE1', 1.25), ('CD', 'OE2', 1.25)],
+    'HIS': [('CB', 'CG', 1.50), ('CG', 'ND1', 1.38), ('CG', 'CD2', 1.36), ('ND1', 'CE1', 1.33), ('CD2', 'NE2', 1.38),
+            ('CE1', 'NE2', 1.33)],
+    'ILE': [('CB', 'CG1', 1.53), ('CB', 'CG2', 1.53), ('CG1', 'CD1', 1.52)],
+    'LEU': [('CB', 'CG', 1.53), ('CG', 'CD1', 1.52), ('CG', 'CD2', 1.52)],
+    'LYS': [('CB', 'CG', 1.52), ('CG', 'CD', 1.52), ('CD', 'CE', 1.52), ('CE', 'NZ', 1.49)],
+    'MET': [('CB', 'CG', 1.52), ('CG', 'SD', 1.81), ('SD', 'CE', 1.79)],
+    'PHE': _RING,
+    'PRO': [('CB', 'CG', 1.50), ('CG', 'CD', 1.50), ('CD', 'N', 1.47)],
+    'SER': [('CB', 'OG', 1.42)],
+    'THR': [('CB', 'OG1', 1.43), ('CB', 'CG2', 1.52)],
+    'TRP': [('CB', 'CG', 1.50), ('CG', 'CD1', 1.37), ('CG', 'CD2', 1.43), ('CD1', 'NE1', 1.38), ('NE1', 'CE2', 1.37),
+            ('CD2', 'CE2', 1.41), ('CD2', 'CE3', 1.40), ('CE2', 'CZ2', 1.39), ('CE3', 'CZ3', 1.38),
+            ('CZ2', 'CH2', 1.37), ('CZ3', 'CH2', 1.40)],
+    'TYR': _RING + [('CZ', 'OH', 1.38)],
+    'VAL': [('CB', 'CG1', 1.52), ('CB', 'CG2', 1.52)],
+}
+# two bonds of one residue that differ by 0.1 Å, shorter first: tells an amide oxygen from its nitrogen and the
+# oxygen of threonine from its methyl group, which no single bond length does within its usual spread
+SHORTER = {'ASN': (('CG', 'OD1'), ('CG', 'ND2')), 'GLN': (('CD', 'OE1'), ('CD', 'NE2')),
+           'THR': (('CB', 'OG1'), ('CB', 'CG2'))}
+
+
+def _misordered(u) -> Optional[str]:
+    """Do the side chains sit under their own atom names? `_misfit` looks at the backbone and CB only; a
+    topology that lists the atoms of a side chain in another order than the trajectory passes it and puts every
+    coordinate beyond CB on the wrong atom. Every side-chain bond is measured here, in up to five frames spread
+    over the trajectory. Returns None when all is well, else what is not."""
+    names, resnames, resix = _attr(u.atoms, 'names'), _attr(u.atoms, 'resnames'), u.atoms.resindices
+    if names is None or resnames is None:
+        return None
+    same = {}
+    for pair in set(zip(resnames, names)):
+        same[pair] = canonical(*pair)
+    canon = np.array([same[p] for p in zip(resnames, names)])
+    where = {}
+    for res, bonds in SIDE_BONDS.items():
+        of = np.where(canon[:, 0] == res)[0]
+        if not len(of):
+            continue
+        spot = {n: of[canon[of, 1] == n] for n in {x for b in bonds for x in b[:2]}}
+        if res == 'MET' and len(spot['SD']) == 0:   # selenomethionine
+            continue
+        for one, two, length in bonds:
+            i, j = spot[one], spot[two]
+            both = np.intersect1d(resix[i], resix[j])
+            i, j = i[np.isin(resix[i], both)], j[np.isin(resix[j], both)]
+            if len(i) and len(i) == len(j) == len(both):   # one atom of each name per residue
+                where[(res, one, two)] = (i[:200], j[:200], length)
+    if not where:
+        return None
+    n = len(u.trajectory)
+    found = {k: [] for k in where}
+    for f in sorted(set(np.linspace(0, n - 1, min(n, 5)).round().astype(int))):
+        xyz = u.trajectory[f].positions
+        for k, (i, j, _) in where.items():
+            found[k].append(np.linalg.norm(xyz[i] - xyz[j], axis=1))
+    u.trajectory[0]
+    found = {k: np.concatenate(v) for k, v in found.items()}
+    for (res, one, two), d in found.items():
+        mid = float(np.median(d))
+        if abs(mid - where[(res, one, two)][2]) > 0.15:
+            return (f'the bonded atoms {one} and {two} of {res} are {mid:.1f} Å apart in it '
+                    f'({where[(res, one, two)][2]:.1f} Å in a real {res})')
+    for res, (short, long) in SHORTER.items():
+        if (res, *short) in found and (res, *long) in found and len(found[(res, *short)]) >= 5 \
+                and len(found[(res, *short)]) == len(found[(res, *long)]):
+            if float(np.median(found[(res, *short)] - found[(res, *long)])) > 0:
+                return (f'in {res} the bond {short[0]}-{short[1]} is longer than {long[0]}-{long[1]}, which it '
+                        f'never is: {short[1]} and {long[1]} have changed places')
+    return None
+
+
 def _reconcile(mda, u, traj: str, n_traj: int, notes: list):
     """Topology and trajectory with different atom counts: the trajectory was saved for part of the system
     (gmx trjconv/mdrun with an output group, cpptraj strip), or the topology was written for part of it."""
@@ -651,9 +738,14 @@ def _universe(top: str, traj: Optional[str]):
             _original_numbers(mda, u, top, notes)
             if traj and n_traj != len(u.atoms):
                 u = _reconcile(mda, u, traj, n_traj, notes)
+                wrong = _misordered(u)
+                if wrong:
+                    raise ValueError(
+                        f'the trajectory does not belong to the topology: {wrong}. The two files list the atoms '
+                        'of the side chains in a different order. Give the topology the trajectory was run with')
             elif traj:
                 u.load_new(traj)
-                wrong = _misfit(u)
+                wrong = _misfit(u) or _misordered(u)
                 if wrong:
                     raise ValueError(
                         f'the trajectory has as many atoms as the topology ({n_traj}) but does not belong to it: '
@@ -705,7 +797,8 @@ def _polymer(u, renumber: Optional[dict] = None, extra=None):
         keep &= np.isin(altloc, ('', 'A'))
     index = np.where(keep)[0]
     if not len(index):
-        raise ValueError('No protein or nucleic acid found in the topology')
+        raise ValueError('No protein or nucleic acid found in the topology: a residue counts when it has N and CA '
+                         "atoms, or a sugar C4'. Cα-only and coarse-grained models are not read")
 
     ribose = has("O2'", 'O2*')[resix[index]]
     kind = np.where(protein[resix[index]], 'protein', np.where(nucleic[resix[index]], 'nucleic', 'other'))
@@ -931,7 +1024,7 @@ def _read_trajectory(top: str, traj: Optional[str], chains, stride: int = 1, max
     else None; `waters` is a list of oxygen positions per frame when asked for, else None.
     """
     if traj is None and not (select or renumber or waters) and \
-            (_plain_pdb(top) or (chains and top.lower().endswith(('.pdb', '.ent')))):
+            _plain_pdb(top, chains):
         a, b = pick_chains(top, chains)
         atoms, coords, _ = read_pdb(top, (a, b), all_models=True)
         keep = np.arange(len(coords))[::stride]
@@ -1038,7 +1131,10 @@ def fep(top: str, windows: Sequence[str], chains: Optional[Sequence[str]] = None
     an optional `lambda` column sets the axis, otherwise windows are spaced evenly from 0 to 1.
     """
     stacks, lam, log, wat = [], [], [], [] if waters else None
-    table = pd.read_csv(dg) if dg else None
+    try:
+        table = pd.read_csv(dg) if dg else None
+    except (OSError, ValueError) as e:      # pandas' "No columns to parse from file" does not say which file
+        raise ValueError(f'--dg {dg}: {getattr(e, "strerror", None) or str(e).rstrip(".")}') from e
     if table is not None and len(table) != len(windows):
         raise ValueError(f'{dg} has {len(table)} rows but there are {len(windows)} windows')
     if table is not None and 'dG' not in table:

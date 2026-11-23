@@ -7,3 +7,7 @@ dist/
 *.log
 formats_out/
 out/
+
+# MDAnalysis trajectory offset caches
+.*_offsets.npz
+.*_offsets.lock

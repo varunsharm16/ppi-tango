@@ -115,7 +115,7 @@ Ideas, roughly in order of how likely they are to find something:
 - other complexes from the PDB (`ppitango nma some.pdb`): antibodies with insertion codes (1HZH), more than
   two chains, a ligand or an ion as one side (`--select protein "resname ZN"`), nucleic acids (1ZAA);
 - options the README lists: `--select`, `--renumber`, `--chains`, `--stride`, `--max-frames`, `--smooth`,
-  `--waters`, `--max-residues`, `--seconds`, `--fps`, `--title`, `-o` into a folder that does not exist;
+  `--waters`, `--max-residues`, `--seconds`, `--fps`, `--title`, `-o` as a prefix (`-o out/run1`) or a folder (`-o out/`), also one that does not exist;
 - wrong input on purpose: a chain that is not there, one chain only, a single frame, a trajectory that does
   not belong to the topology, an empty file. The README says such runs stop with a message that names the
   problem. A Python traceback is a finding;
