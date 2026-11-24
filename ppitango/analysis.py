@@ -171,8 +171,11 @@ class Analysis:
 
     def save(self, prefix: str) -> List[str]:
         files = [f'{prefix}_contacts.csv', f'{prefix}_buried_surface.csv']
-        self.contacts.to_csv(files[0], index=False)
-        self.buried.to_csv(files[1], index=False)
+        for table, file in zip((self.contacts, self.buried), files):
+            try:
+                table.to_csv(file, index=False)
+            except OSError as e:     # a full disk fails in the write, where the error no longer names the file
+                raise OSError(e.errno, e.strerror, file) from None
         return files
 
     def scene(self, smooth: Optional[int] = None, max_residues: int = 14, min_occupancy: float = 0.5) -> 'Scene':

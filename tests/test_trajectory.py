@@ -278,14 +278,16 @@ def test_trajectory_of_another_setup_is_refused(tmp_path):
         ensembles.md(str(other), TRAJ, chains=['A', 'D'], max_frames=FRAMES)
 
 
-def _renamed(path, change, only=None):
-    """TOP with the atom names of every residue (of the kinds in `only`) handed round by `change`: the
-    coordinates of the trajectory then land on other atoms of the same residue."""
+def _renamed(path, change, only=None, at=None):
+    """TOP with the atom names of every residue (of the kinds in `only`, or the one residue `at`, chain and
+    number as columns 22 to 26 have them) handed round by `change`: the coordinates of the trajectory then land
+    on other atoms of the same residue."""
     out, residue = [], []
     for line in [l for l in open(TOP) if l.startswith(('ATOM', 'HETATM'))] + ['']:
         if residue and line[17:27] != residue[0][17:27]:
             names = [(l[12:16], l[76:78]) for l in residue]
-            new = change(names) if only is None or residue[0][17:20] in only else names
+            hit = (only is None or residue[0][17:20] in only) and (at is None or residue[0][21:26] == at)
+            new = change(names) if hit else names
             out += [l[:12] + a + l[16:76] + e + l[78:] for l, (a, e) in zip(residue, new)]
             residue = []
         residue.append(line)
@@ -316,18 +318,70 @@ def _reverse_side_chain(names):
     return names
 
 
-@pytest.mark.parametrize('change, only, said', [
-    (_reverse_side_chain, None, 'the bonded atoms CB and CG of'),
-    (_swap('NE', 'NH1'), ('ARG',), 'the bonded atoms CD and NE of ARG'),
-    (_swap('OD1', 'ND2'), ('ASN',), 'OD1 and ND2 have changed places'),
-    (_swap('OE1', 'NE2'), ('GLN',), 'OE1 and NE2 have changed places'),
-    (_swap('OG1', 'CG2'), ('THR',), 'OG1 and CG2 have changed places'),
+@pytest.mark.parametrize('change, only, at, frames, said', [
+    (_reverse_side_chain, None, None, FRAMES, 'in frame 1 the bonded atoms CB and CG of .* more bonds are off'),
+    (_swap('NE', 'NH1'), ('ARG',), None, FRAMES, 'in frame 1 the bonded atoms .* of ARG'),
+    (_swap('OD1', 'ND2'), ('ASN',), None, FRAMES, 'in ASN, .*OD1 and ND2 have changed places'),
+    (_swap('OE1', 'NE2'), ('GLN',), None, FRAMES, 'OE1 and NE2 have changed places'),
+    (_swap('OG1', 'CG2'), ('THR',), None, FRAMES, 'OG1 and CG2 have changed places'),
+    # one residue only, at the interface and far from it: every residue is judged on its own
+    (_reverse_side_chain, None, 'A  62', FRAMES, 'CB and CG of LYS 62 of chain A are'),
+    (_reverse_side_chain, None, 'D  54', FRAMES, 'of ARG 54 of chain D are'),
+    (_swap('CD1', 'CD2'), None, 'A  35', FRAMES, 'of TRP 35 of chain A are'),
+    (_swap('OD1', 'ND2'), None, 'A  58', 12, r'in the frames read from 1 to \d+, in ASN 58 of chain A, .*OD1 and ND2'),
+    (_swap('OE1', 'NE2'), None, 'D  72', 12, 'in GLN 72 of chain D, .*OE1 and NE2'),
+    (_swap('OG1', 'CG2'), None, 'A  26', 12, 'in THR 26 of chain A, .*OG1 and CG2'),
 ])
-def test_side_chains_in_another_order_are_refused(tmp_path, change, only, said):
+def test_side_chains_in_another_order_are_refused(tmp_path, change, only, at, frames, said):
     """Backbone and CB in place, the atoms beyond them not: only the side-chain bonds tell."""
-    other = _renamed(tmp_path / 'other.pdb', change, only)
-    with pytest.raises(ValueError, match=f'does not belong to it: .*{said}'):
-        ensembles.md(other, TRAJ, chains=['A', 'D'], max_frames=FRAMES)
+    other = _renamed(tmp_path / 'other.pdb', change, only, at)
+    with pytest.raises(ValueError, match=f'does not belong to .*: .*{said}'):
+        ensembles.md(other, TRAJ, chains=['A', 'D'], max_frames=frames)
+
+
+def _rewritten(path, change, n=24):
+    """The first `n` frames of TRAJ with `change(positions, frame)` applied to each."""
+    u = mda.Universe(TOP, TRAJ)
+    with mda.Writer(str(path), len(u.atoms)) as w:
+        for ts in u.trajectory[:n]:
+            ts.positions = change(u, ts)
+            w.write(u.atoms)
+    return str(path)
+
+
+def test_trajectory_that_turns_wrong_later_is_refused(tmp_path):
+    """Two runs with differently ordered topologies joined into one file: right at first, wrong from frame 13
+    on. Every frame that is read is measured, not a sample."""
+    def change(u, ts):
+        xyz = ts.positions.copy()
+        if ts.frame >= 12:
+            side = u.select_atoms('chainID A and resid 62 and name CG CD CE NZ').indices
+            xyz[side] = xyz[side[::-1]]
+        return xyz
+    joined = _rewritten(tmp_path / 'joined.dcd', change)
+    with pytest.raises(ValueError, match='in frame 13 the bonded atoms .* of LYS 62 .*The frames before fit'):
+        ensembles.md(TOP, joined, chains=['A', 'D'], max_frames=None)
+
+
+def test_residues_cut_by_the_box_are_not_taken_for_a_wrong_trajectory(tmp_path, reference):
+    """A raw trajectory has every atom put into the box on its own. With a box face through each of the three
+    His (all there are), their bonds reach across the box in every frame: still the right trajectory."""
+    def change(u, ts):
+        box = ts.dimensions[:3]
+        cut = [u.select_atoms(f'chainID {c} and resid {r} and name CG').positions[0][k]
+               for k, (c, r) in enumerate((('A', 102), ('D', 17), ('A', 18)))]
+        xyz = ts.positions - np.array(cut) + box
+        return xyz - np.floor(xyz / box) * box
+    u = mda.Universe(TOP, TRAJ)
+    keep = np.linspace(0, len(u.trajectory) - 1, FRAMES).round().astype(int)
+    with mda.Writer(str(tmp_path / 'raw.dcd'), len(u.atoms)) as w:
+        for ts in u.trajectory[keep]:
+            ts.positions = change(u, ts)
+            w.write(u.atoms)
+    ens = ensembles.md(TOP, str(tmp_path / 'raw.dcd'), chains=['A', 'D'], dt=0.1)
+    assert any('made whole' in line for line in ens.log)
+    keys, dist = _contacts(ens)       # the shift costs a float32 its last digits: distances are printed to 0.01 Å
+    assert keys.equals(reference[0]) and np.abs(dist - reference[1]).max() < 0.02
 
 
 def test_force_field_files_pass_the_side_chain_check():
@@ -335,7 +389,37 @@ def test_force_field_files_pass_the_side_chain_check():
     for top, traj in (('gromacs/md.gro', 'gromacs/md.xtc'), ('amber/complex.prmtop', 'amber/md.nc'),
                       ('charmm/complex.psf', 'charmm/md.dcd')):
         u = ensembles._universe(f'examples/formats/{top}', f'examples/formats/{traj}')
-        assert ensembles._misordered(u) is None and u.trajectory.frame == 0
+        check = ensembles._SideChains(u)
+        assert len(check.i) > 600 and len(check.pairs) == 3
+        assert [check.frame(ts) for ts in u.trajectory] == [None] * len(u.trajectory) and check.close() is None
+
+
+def test_missing_residues_do_not_split_a_chain(tmp_path):
+    """A crystal structure without chain IDs: barstar lacks residues 64 and 65 in two of its three copies. The
+    hole is one the two missing residues span, so it is one chain, and the pair followed is a real complex."""
+    lines = [l[:21] + ' ' + l[22:] if l.startswith(('ATOM', 'HETATM', 'TER')) and len(l) > 22 else l
+             for l in open('examples/data/1BRS.pdb')]
+    for name, kept in (('ter.pdb', lines), ('no_ter.pdb', [l for l in lines if not l.startswith('TER')])):
+        (tmp_path / name).write_text(''.join(kept))
+        ens = ensembles.nma(str(tmp_path / name), frames=4)
+        table = '\n'.join(ens.log)
+        assert table.count(' residues, ') == 6 and 'D has no residues between THR63 and GLY66' in table
+        assert {ens.atoms.resname[ens.atoms.chain == c].iloc[0] for c in ens.chains} == {'ALA', 'LYS'}
+    # chain IDs on some atoms only: said so, and a chain is not cut where its ID stops
+    some = [l[:21] + ' ' + l[22:] if l.startswith('ATOM') and l[21] == 'A' and int(l[22:26]) >= 50 else l
+            for l in open('examples/data/1BRS.pdb')]
+    (tmp_path / 'some.pdb').write_text(''.join(some))
+    table = '\n'.join(ensembles.nma(str(tmp_path / 'some.pdb'), frames=4).log)
+    assert 'some atoms have no chain ID' in table and 'A: 108 residues, VAL3 to ARG110' in table
+
+
+def test_calpha_only_model_is_refused_with_the_reason(tmp_path):
+    only = tmp_path / 'ca.pdb'
+    only.write_text(''.join(l for l in open(TOP) if not l.startswith('ATOM') or l[12:16].strip() == 'CA'))
+    with pytest.raises(ValueError, match='Cα-only and coarse-grained models are not read'):
+        ensembles.nma(str(only), frames=4)
+    with pytest.raises(ValueError, match='Cα-only and coarse-grained models are not read'):
+        ensembles.nma(str(only), chains=['A', 'D'], frames=4)
 
 
 def test_pdb_without_chain_ids_gets_its_chains_lettered(tmp_path):

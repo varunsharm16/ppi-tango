@@ -134,7 +134,19 @@ def test_cli_checks_options_before_working(pdb, tmp_path, capsys):
     with pytest.raises(SystemExit) as e:
         main(['fep', pdb, pdb, '--dg', str(tmp_path / 'none.csv')])
     assert 'none.csv' in str(e.value)
+    with pytest.raises(SystemExit) as e:
+        main(['nma', pdb, '--renumber', 'A:x'])
+    assert e.value.code == 2 and 'CHAIN:FIRST' in capsys.readouterr().err
     assert os.listdir(tmp_path) == []
+    for text, said in (('window,dG\n0,abc\n1,def\n', "row 1 holds 'abc'"), ('window,dG\n0,0.5\n1,\n', 'row 2')):
+        (tmp_path / 'dg.csv').write_text(text)
+        with pytest.raises(SystemExit) as e:
+            main(['fep', pdb, pdb, pdb, '--dg', str(tmp_path / 'dg.csv'), '-o', str(tmp_path / 'x')])
+        assert 'dg.csv: the dG column needs a number' in str(e.value) and said in str(e.value)
+    (tmp_path / 'dg.csv').write_bytes(b'A\xc5\x01\xff\n' * 20)
+    with pytest.raises(SystemExit) as e:
+        main(['fep', pdb, pdb, pdb, '--dg', str(tmp_path / 'dg.csv'), '-o', str(tmp_path / 'x')])
+    assert 'dg.csv: not a text file' in str(e.value)
 
 
 def test_cli_output_folder(pdb, tmp_path, capsys):
@@ -145,6 +157,19 @@ def test_cli_output_folder(pdb, tmp_path, capsys):
     assert sorted(os.listdir(tmp_path / 'new')) == [f'{name}_nma_buried_surface.csv', f'{name}_nma_contacts.csv']
     main(['nma', pdb, '--frames', '4', '--no-movie', '--no-viewer', '-o', str(tmp_path / 'new')])
     assert len(os.listdir(tmp_path / 'new')) == 2 and os.listdir(tmp_path) == ['new']
+    # an output file that cannot be replaced stops the run before the analysis too
+    (tmp_path / 'new' / 'taken_viewer.html').mkdir()
+    movie = tmp_path / 'new' / 'taken_contacts.mp4'
+    movie.write_text('')
+    movie.chmod(0o444)
+    for options, said in ((['--no-movie'], 'taken_viewer.html: a folder of that name is in the way'),
+                          (['--no-viewer'], 'taken_contacts.mp4: the file exists and is read-only')):
+        if os.access(movie, os.W_OK):           # as root
+            continue
+        capsys.readouterr()
+        with pytest.raises(SystemExit) as e:
+            main(['nma', pdb, *options, '-o', f'{tmp_path}/new/taken'])
+        assert said in str(e.value) and 'analysed' not in capsys.readouterr().out
     locked = tmp_path / 'locked'
     locked.mkdir()
     locked.chmod(0o555)

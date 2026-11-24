@@ -3,6 +3,8 @@
 Contact lines fade in and out with their (smoothed) occupancy, distances tick, and the side panels
 follow the contact counts and buried surface along the mode / trajectory / lambda axis.
 """
+import subprocess
+
 import matplotlib
 
 matplotlib.use('Agg')
@@ -272,22 +274,32 @@ def render(scene: Scene, output: str, seconds: float = 12.0, fps: int = 30, titl
     plt.rcParams['animation.ffmpeg_path'] = imageio_ffmpeg.get_ffmpeg_exe()
     # yuv420p + even dimensions: plays in PowerPoint, Keynote, QuickTime and browsers
     writer = FFMpegWriter(fps=fps, codec='libx264', extra_args=['-pix_fmt', 'yuv420p', '-crf', '18'])
-    with plt.rc_context(RC):
-        anim.save(output, writer=writer, dpi=dpi)
-    plt.close(report.fig)
+    try:
+        with plt.rc_context(RC):
+            anim.save(output, writer=writer, dpi=dpi)
+    except (subprocess.CalledProcessError, OSError):   # ffmpeg gave up; its own words are printed by matplotlib
+        raise _encoder_stopped(output) from None
+    finally:
+        plt.close(report.fig)
     return output
+
+
+def _encoder_stopped(output: str) -> OSError:
+    return OSError(f'could not write {output}: the video encoder (ffmpeg) stopped. Is the disk full, or the file '
+                   'not writable?')
 
 
 def to_gif(mp4: str, width: int = 960, fps: int = 12) -> str:
     """Convert a movie to a GIF next to it (for READMEs and chat; slides should use the MP4)."""
-    import subprocess
-
     import imageio_ffmpeg
     gif = mp4[:-4] + '.gif'
     chain = (f'fps={fps},scale={width}:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=96[p];'
              f'[b][p]paletteuse=dither=none')
-    subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), '-y', '-loglevel', 'error', '-i', mp4, '-vf', chain, gif],
-                   check=True)
+    try:
+        subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), '-y', '-loglevel', 'error', '-i', mp4, '-vf', chain, gif],
+                       check=True)
+    except (subprocess.CalledProcessError, OSError):
+        raise _encoder_stopped(gif) from None
     return gif
 
 

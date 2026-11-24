@@ -46,6 +46,19 @@ def _prefix(output, name):
     return prefix
 
 
+def _free(args, prefix):
+    """Stop before any work when a file to be written is in the way: a folder of that name, or a file that may
+    not be overwritten."""
+    ends = ['_contacts.csv', '_buried_surface.csv'] + ['_viewer.html'] * (not args.no_viewer) + \
+        ['_contacts.mp4'] * (not args.no_movie) + ['_3d.mp4'] * args.movie3d + ['.blend'] * args.blender
+    ends += [e[:-4] + '.gif' for e in ends if e.endswith('.mp4') and args.gif]
+    for file in (prefix + e for e in ends):
+        if os.path.isdir(file):
+            sys.exit(f'ppitango: cannot write {file}: a folder of that name is in the way')
+        if os.path.exists(file) and not os.access(file, os.W_OK):
+            sys.exit(f'ppitango: cannot write {file}: the file exists and is read-only')
+
+
 def _common(p):
     p.add_argument('--select', nargs=2, metavar=('SIDE_A', 'SIDE_B'),
                    help='the two sides as MDAnalysis selections instead of chain IDs, e.g. '
@@ -130,12 +143,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
     source = args.pdb if args.command == 'nma' else args.topology if args.command == 'fep' else \
         args.trajectory or args.topology
-    prefix = _prefix(args.output, f'{os.path.splitext(os.path.basename(source))[0]}_{args.command}')
     try:
-        try:
-            renumber = {c: int(n) for c, n in (item.split(':') for item in args.renumber)} or None
-        except ValueError:
-            raise ValueError('--renumber takes CHAIN:FIRST items, e.g. --renumber A:3 B:1')
+        renumber = {c: int(n) for c, n in (item.split(':') for item in args.renumber)} or None
+    except ValueError:
+        parser.error('--renumber takes CHAIN:FIRST items, e.g. --renumber A:3 B:1')
+    prefix = _prefix(args.output, f'{os.path.splitext(os.path.basename(source))[0]}_{args.command}')
+    _free(args, prefix)
+    try:
         if args.command == 'nma':
             ens = ensembles.nma(args.pdb, args.chains, args.mode, args.rmsd, args.frames, select=args.select,
                                 renumber=renumber)
@@ -163,7 +177,11 @@ def _work(args, ens, prefix):
         sys.exit('ppitango: only one frame was read, so there is nothing to animate. For a single structure use '
                  'ppitango nma, or PandaPPI itself for a static map.')
     print(f'{ens.title}: {ens.pair}, {ens.n_frames} frames, {len(ens.atoms)} heavy atoms')
-    result = analysis.analyze(ens, cutoff=args.distance_cutoff, workers=args.workers)
+    try:
+        result = analysis.analyze(ens, cutoff=args.distance_cutoff, workers=args.workers)
+    except OSError as e:      # PandaPPI reads each frame from a temporary file
+        sys.exit(f'ppitango: the analysis could not write its temporary files in {tempfile.gettempdir()}: '
+                 f'{e.strerror or e}')
     if result.contacts.empty:
         sys.exit(f'ppitango: no contacts between {ens.pair} in any frame - nothing to animate.')
     scene = result.scene(smooth=args.smooth, max_residues=args.max_residues)

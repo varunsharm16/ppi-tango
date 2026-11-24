@@ -94,6 +94,10 @@ def write(scene: Scene, output: str, title: str = '') -> str:
     # str.replace would re-scan inserted text; split keeps the three parts independent
     head, rest = html.split('__3DMOL__', 1)
     mid, tail = rest.split('__DATA__', 1)
-    with open(output, 'w', encoding='utf-8') as f:
-        f.write(head.replace('__TITLE__', data['title']) + lib.replace('</script', '<\\/script') + mid + payload + tail)
+    try:
+        with open(output, 'w', encoding='utf-8') as f:
+            f.write(head.replace('__TITLE__', data['title']) + lib.replace('</script', '<\\/script') + mid + payload
+                    + tail)
+    except OSError as e:     # a full disk fails in the write, where the error no longer names the file
+        raise OSError(e.errno, e.strerror, output) from None
     return output

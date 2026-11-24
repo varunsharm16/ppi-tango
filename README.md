@@ -78,8 +78,13 @@ trajectory (xtc, trr, dcd, nc ...). Nothing needs preparing by hand:
   lengths. The reverse works too: a solute-only topology with a full trajectory, when the solute comes first
   in the system, as MD programs write it. What was assumed is printed.
 - **Chains.** With chain IDs in the topology, `--chains A D` picks two; left out, the pair with most contacts
-  is followed. Files without chain IDs (gro, prmtop, most psf) get their chains lettered A, B, C ... in file
-  order, split wherever the backbone breaks, and the table is printed so you can pick:
+  is followed. Files without chain IDs (gro, prmtop, most psf), or with IDs on some atoms only, get their
+  chains lettered A, B, C ... in file order, and the table is printed so you can pick. A new chain starts at
+  a `TER` record, where the residue numbers start again, where the segment changes, and where the backbone
+  is not bonded to the residue before. One exception: a hole in the numbering of up to 30 residues that the
+  missing residues could span (3.8 Å each) is a loop the structure does not show, not a new chain, and the
+  table says so. Two chains whose numbers run on with such a hole and whose ends sit that close would be
+  taken for one: name the sides with `--select` then.
 
   ```
   Chains (no chain IDs in the topology: chains lettered in file order, split where the backbone breaks):
@@ -113,11 +118,17 @@ trajectory (xtc, trr, dcd, nc ...). Nothing needs preparing by hand:
   `--dt` (time between saved frames, with `--unit`), or the axis counts frames.
 - **Topology and trajectory must be of the same run.** The same protein set up by two programs lists its
   atoms in a different order (GROMACS puts a residue's C and O last, OpenMM and the PDB before the side
-  chain), and coordinates would then land on the wrong atoms. ppi-tango measures the bonds of the
-  backbone and of every side chain in the trajectory and stops when they are off, also when an amide oxygen
-  and nitrogen (Asn, Gln) or the oxygen and methyl group of Thr have changed places. It cannot see atoms
-  swapped within a symmetric group (the two oxygens of Asp or Glu, the ring sides of Phe and Tyr, the methyl
-  groups of Val and Leu, the end nitrogens of Arg) or a flipped His ring: the bond lengths are the same.
+  chain), and coordinates would then land on the wrong atoms. ppi-tango measures the backbone bonds in the
+  first frame, and every side-chain bond of every residue in each frame it reads (across the periodic box,
+  so residues cut by a box face are fine). It stops at the first bond more than 0.4 Å off its usual length
+  and names the residue and the frame, also when a trajectory fits at first and not later (two runs joined).
+  An amide oxygen and nitrogen (Asn, Gln), or the oxygen and methyl group of Thr, that have changed places
+  differ by 0.1 Å only: those are found from the mean over five frames read in a row, so a swap that lasts
+  fewer than five read frames, or sits in frames that `--stride` and `--max-frames` skip, can go unseen.
+  It cannot see atoms swapped within a symmetric group (the two oxygens of Asp or Glu, the ring sides of
+  Phe and Tyr, the methyl groups of Val and Leu, the end nitrogens of Arg) or a flipped His ring: the bond
+  lengths are the same. Nucleotides, and residues with other names than the twenty standard ones and their
+  force-field variants, are measured along the backbone only, in the first frame.
 - **Long trajectories**: 200 evenly spaced frames are analysed (`--max-frames`, `--stride`), and only those
   are read, so trajectory length hardly matters.
 
@@ -248,7 +259,7 @@ from ppitango import movie, viewer, movie3d, blender
 movie.render(scene, 'contacts.mp4')
 viewer.write(scene, 'viewer.html')
 movie3d.render(scene, '3d.mp4')
-blender.write(scene, 'scene.blend')
+blender.write(scene, 'scene.blend')       # needs the [blender] extra on Python 3.11
 ```
 
 ## Demos

@@ -126,6 +126,10 @@ def _number(atoms: pd.DataFrame) -> pd.DataFrame:
     return atoms.drop(columns=[c for c in ('icode', 'part') if c in atoms])
 
 
+NO_POLYMER = ('No protein or nucleic acid found in the topology: a residue counts when it has N and CA atoms, or a '
+              "sugar C4'. Cα-only and coarse-grained models are not read")
+
+
 def read_pdb(path: str, chains: Optional[Sequence[str]] = None, all_models: bool = False):
     """Heavy polymer atoms of a PDB file.
 
@@ -161,6 +165,8 @@ def read_pdb(path: str, chains: Optional[Sequence[str]] = None, all_models: bool
     atoms = pd.DataFrame(rows, columns=['chain', 'resname', 'resnum', 'name', 'element', 'icode'])
     if atoms.empty:
         raise ValueError(f'No polymer atoms found in {path}' + (f' for chains {list(chains)}' if chains else ''))
+    if not atoms.name.isin(['N', "C4'"]).any():
+        raise ValueError(f'{path}: {NO_POLYMER}')
     atoms = _number(atoms)
     if len({len(m) for m in models}) != 1:
         raise ValueError(f'{path}: models do not all contain the same atoms')
@@ -622,54 +628,99 @@ SHORTER = {'ASN': (('CG', 'OD1'), ('CG', 'ND2')), 'GLN': (('CD', 'OE1'), ('CD', 
            'THR': (('CB', 'OG1'), ('CB', 'CG2'))}
 
 
-def _misordered(u) -> Optional[str]:
-    """Do the side chains sit under their own atom names? `_misfit` looks at the backbone and CB only; a
-    topology that lists the atoms of a side chain in another order than the trajectory passes it and puts every
-    coordinate beyond CB on the wrong atom. Every side-chain bond is measured here, in up to five frames spread
-    over the trajectory. Returns None when all is well, else what is not."""
-    names, resnames, resix = _attr(u.atoms, 'names'), _attr(u.atoms, 'resnames'), u.atoms.resindices
-    if names is None or resnames is None:
+class _SideChains:
+    """Do the side chains sit under their own atom names, in every frame that is read? `_misfit` looks at the
+    backbone and CB of the first frame only; a topology that lists the atoms of a side chain in another order
+    than the trajectory passes it and puts every coordinate beyond CB on the wrong atom.
+
+    Every side-chain bond of every residue is measured in each frame given to `frame`, across the periodic box
+    (a residue cut by a box face is whole to this check). A bond more than 0.4 Å off its usual length is a
+    wrong atom: no force field stretches a bond that far, and the nearest non-bonded atom is 0.9 Å further.
+    An amide oxygen and nitrogen, or the oxygen and methyl group of Thr, differ by 0.1 Å only, which is within
+    the vibration of one bond in one frame: those are told apart by the mean over five frames in a row (in
+    correct runs that mean stays 0.07 Å away from the limit).
+    `frame` and `close` return None when all is well, else what is not."""
+    TOLERANCE, BLOCK, LONGER = 0.4, 5, 0.03
+
+    def __init__(self, u):
+        from collections import deque
+        self.u = u
+        names, resnames, resix = _attr(u.atoms, 'names'), _attr(u.atoms, 'resnames'), u.atoms.resindices
+        i, j, length, self.what, self.pairs = [], [], [], [], []
+        if names is not None and resnames is not None:
+            same = {pair: canonical(*pair) for pair in set(zip(resnames, names))}
+            canon = np.array([same[p] for p in zip(resnames, names)])
+            for res, bonds in SIDE_BONDS.items():
+                of = np.where(canon[:, 0] == res)[0]
+                found = {}
+                for one, two, usual in bonds if len(of) else ():
+                    # residues with exactly one atom of each name (alternate locations and cut residues drop out)
+                    ends = []
+                    for name in (one, two):
+                        at = of[canon[of, 1] == name]
+                        r, first, count = np.unique(resix[at], return_index=True, return_counts=True)
+                        ends.append((r[count == 1], at[first[count == 1]]))
+                    both, a, b = np.intersect1d(ends[0][0], ends[1][0], return_indices=True)
+                    if len(both):
+                        found[(one, two)] = (both, len(self.what) + np.arange(len(both)))
+                        i.append(ends[0][1][a]); j.append(ends[1][1][b])
+                        length += [usual] * len(both)
+                        self.what += [(res, one, two)] * len(both)
+                short, long = SHORTER.get(res, (None, None))
+                if short in found and long in found:
+                    _, a, b = np.intersect1d(found[short][0], found[long][0], return_indices=True)
+                    if len(a):
+                        self.pairs.append((res, short, long, found[short][1][a], found[long][1][b]))
+        self.i, self.j = (np.concatenate(x) if x else np.zeros(0, int) for x in (i, j))
+        self.length = np.array(length)
+        self.last, self.fresh, self.frames, self.before = deque(maxlen=self.BLOCK), 0, [], 0
+
+    def _residue(self, k):
+        atom = self.u.atoms[int(self.i[k])]
+        chain = getattr(atom, 'chainID', '') or ''
+        return f'{self.what[k][0]} {atom.resid}' + (f' of chain {chain}' if chain.strip() else '')
+
+    def frame(self, ts):
+        if not len(self.i):
+            return None
+        from MDAnalysis.lib.distances import calc_bonds
+        box = ts.dimensions if ts.dimensions is not None and ts.dimensions[:3].min() > 0 else None
+        d = calc_bonds(ts.positions[self.i], ts.positions[self.j], box=box)
+        off = np.where(np.abs(d - self.length) > self.TOLERANCE)[0]
+        if len(off):
+            self.before = len(self.frames)
+            k = off[np.abs(d - self.length)[off].argmax()]
+            res, one, two = self.what[k]
+            return (f'in frame {ts.frame + 1} the bonded atoms {one} and {two} of {self._residue(k)} are '
+                    f'{d[k]:.1f} Å apart ({self.length[k]:.1f} Å in a real {res})'
+                    + (f', and {len(off) - 1} more bonds are off' if len(off) > 1 else '')
+                    + ('. The trajectory holds no box: if its molecules were wrapped into the periodic box, '
+                       'that cannot be undone' if box is None and d[k] > 10 else ''))
+        self.last.append(d)
+        self.frames.append(ts.frame + 1)
+        self.fresh += 1
+        return self._changed_places() if self.fresh == self.BLOCK else None
+
+    def close(self):
+        return self._changed_places() if self.fresh else None
+
+    def _changed_places(self):
+        d, frames = np.array(self.last), self.frames[-len(self.last):]
+        self.fresh, self.before = 0, len(self.frames) - len(d)
+        for res, short, long, a, b in self.pairs:
+            diff = d[:, a] - d[:, b]
+            if len(d) >= self.BLOCK:  # enough frames to judge each residue on its own
+                bad = np.where(diff.mean(0) > self.LONGER)[0]
+                who = f'{self._residue(a[bad[0]])}' + (f' and {len(bad) - 1} more' if len(bad) > 1 else '') \
+                    if len(bad) else ''
+            else:                     # a few frames only: all residues of the kind together
+                bad = [0] if diff.size >= 5 and np.median(diff) > 0 else []
+                who = res
+            if len(bad):
+                return (f'in the frames read from {frames[0]} to {frames[-1]}, in {who}, the bond {short[0]}-{short[1]} is '
+                        f'longer than {long[0]}-{long[1]}, which it never is: {short[1]} and {long[1]} have '
+                        'changed places')
         return None
-    same = {}
-    for pair in set(zip(resnames, names)):
-        same[pair] = canonical(*pair)
-    canon = np.array([same[p] for p in zip(resnames, names)])
-    where = {}
-    for res, bonds in SIDE_BONDS.items():
-        of = np.where(canon[:, 0] == res)[0]
-        if not len(of):
-            continue
-        spot = {n: of[canon[of, 1] == n] for n in {x for b in bonds for x in b[:2]}}
-        if res == 'MET' and len(spot['SD']) == 0:   # selenomethionine
-            continue
-        for one, two, length in bonds:
-            i, j = spot[one], spot[two]
-            both = np.intersect1d(resix[i], resix[j])
-            i, j = i[np.isin(resix[i], both)], j[np.isin(resix[j], both)]
-            if len(i) and len(i) == len(j) == len(both):   # one atom of each name per residue
-                where[(res, one, two)] = (i[:200], j[:200], length)
-    if not where:
-        return None
-    n = len(u.trajectory)
-    found = {k: [] for k in where}
-    for f in sorted(set(np.linspace(0, n - 1, min(n, 5)).round().astype(int))):
-        xyz = u.trajectory[f].positions
-        for k, (i, j, _) in where.items():
-            found[k].append(np.linalg.norm(xyz[i] - xyz[j], axis=1))
-    u.trajectory[0]
-    found = {k: np.concatenate(v) for k, v in found.items()}
-    for (res, one, two), d in found.items():
-        mid = float(np.median(d))
-        if abs(mid - where[(res, one, two)][2]) > 0.15:
-            return (f'the bonded atoms {one} and {two} of {res} are {mid:.1f} Å apart in it '
-                    f'({where[(res, one, two)][2]:.1f} Å in a real {res})')
-    for res, (short, long) in SHORTER.items():
-        if (res, *short) in found and (res, *long) in found and len(found[(res, *short)]) >= 5 \
-                and len(found[(res, *short)]) == len(found[(res, *long)]):
-            if float(np.median(found[(res, *short)] - found[(res, *long)])) > 0:
-                return (f'in {res} the bond {short[0]}-{short[1]} is longer than {long[0]}-{long[1]}, which it '
-                        f'never is: {short[1]} and {long[1]} have changed places')
-    return None
 
 
 def _reconcile(mda, u, traj: str, n_traj: int, notes: list):
@@ -738,14 +789,9 @@ def _universe(top: str, traj: Optional[str]):
             _original_numbers(mda, u, top, notes)
             if traj and n_traj != len(u.atoms):
                 u = _reconcile(mda, u, traj, n_traj, notes)
-                wrong = _misordered(u)
-                if wrong:
-                    raise ValueError(
-                        f'the trajectory does not belong to the topology: {wrong}. The two files list the atoms '
-                        'of the side chains in a different order. Give the topology the trajectory was run with')
             elif traj:
                 u.load_new(traj)
-                wrong = _misfit(u) or _misordered(u)
+                wrong = _misfit(u)
                 if wrong:
                     raise ValueError(
                         f'the trajectory has as many atoms as the topology ({n_traj}) but does not belong to it: '
@@ -755,6 +801,17 @@ def _universe(top: str, traj: Optional[str]):
             raise ValueError(f'Could not read {top}' + (f' with {traj}' if traj else '') +
                              f': {str(e).rstrip(".")}.') from e
     u._ppitango_notes = notes
+    if top.lower().endswith(('.pdb', '.ent')):     # TER records end a chain, also where chain IDs are missing
+        n, ter = 0, []
+        with open(top, errors='replace') as f:
+            for line in f:
+                if line.startswith('ENDMDL'):
+                    break
+                n += line.startswith(('ATOM', 'HETATM'))
+                if line.startswith('TER'):
+                    ter.append(n)
+        if n == len(u.atoms):
+            u._ppitango_ter = np.array(ter, int)
     return u
 
 
@@ -797,8 +854,7 @@ def _polymer(u, renumber: Optional[dict] = None, extra=None):
         keep &= np.isin(altloc, ('', 'A'))
     index = np.where(keep)[0]
     if not len(index):
-        raise ValueError('No protein or nucleic acid found in the topology: a residue counts when it has N and CA '
-                         "atoms, or a sugar C4'. Cα-only and coarse-grained models are not read")
+        raise ValueError(NO_POLYMER)
 
     ribose = has("O2'", 'O2*')[resix[index]]
     kind = np.where(protein[resix[index]], 'protein', np.where(nucleic[resix[index]], 'nucleic', 'other'))
@@ -828,21 +884,31 @@ def _polymer(u, renumber: Optional[dict] = None, extra=None):
             rows = np.where(np.isin(name, wanted))[0]
             return dict(zip(res_of[rows], rows))
         tail, head = pick(('C', "O3'", 'O3*')), pick(('N', 'P'))
-        label, k = {}, 0
+        ter = np.sort(getattr(u, '_ppitango_ter', np.zeros(0, int)))    # atoms that follow a TER record
+        label, k, bridged = {}, 0, []
         for prev, cur, s in zip(res_ids[:-1], res_ids[1:], starts[1:]):
             label[prev] = k
-            new = segid[s] != segid[s - 1] or resnum[s] < resnum[s - 1] or kind[s] != kind[s - 1] \
-                or kind[s] == 'other'
+            # a name against no name (segment or chain ID) is no break by itself: a file with IDs on some atoms
+            named = [x[s] != x[s - 1] and not {x[s], x[s - 1]} & {'', 'SYSTEM'} for x in (segid, chain_id)]
+            new = any(named) or resnum[s] < resnum[s - 1] or kind[s] != kind[s - 1] or kind[s] == 'other' \
+                or np.searchsorted(ter, index[s], 'right') > np.searchsorted(ter, index[s - 1], 'right')
             if not new and prev in tail and cur in head:
                 gap = calc_bonds(xyz[tail[prev]][None], xyz[head[cur]][None],
                                  box=box if box is not None and box[:3].min() > 0 else None)[0]
-                new = gap > 2.5
+                # residues missing from a structure (a loop the crystal does not show) leave a hole in the
+                # numbering that the missing residues can span, 3.8 Å each: that is one chain, not two
+                step = resnum[s] - resnum[s - 1]
+                hole = gap > 2.5 and 1 < step <= 30 and gap <= 3.8 * step
+                new = gap > 2.5 and not hole
+                if hole:
+                    bridged.append((k, f'{resname[s - 1]}{resnum[s - 1]}', f'{resname[s]}{resnum[s]}'))
             k += bool(new)
         label[res_ids[-1]] = k
         if k + 1 > len(LETTERS):
             raise ValueError(f'{k + 1} separate chains found; choose the two sides with --select')
         chain = np.array([LETTERS[label[r]] for r in res_of])
-        how = 'no chain IDs in the topology: chains lettered in file order, split where the backbone breaks'
+        how = ('some atoms have no chain ID' if (chain_id != '').any() else 'no chain IDs in the topology') + \
+            ': chains lettered in file order, split where the backbone breaks'
 
     atoms = pd.DataFrame({'chain': chain, 'segid': segid, 'resname': resname, 'resnum': resnum, 'name': name,
                           'element': np.char.upper(elements[index]), 'kind': kind, 'icode': icode})
@@ -859,6 +925,9 @@ def _polymer(u, renumber: Optional[dict] = None, extra=None):
         what = {'protein': 'residues', 'nucleic': 'nucleotides'}.get(first.kind, 'other residues')
         rows.append(f'  {c}: {n} {what}, {first.resname}{first.resnum}{first.icode} to '
                     f'{last.resname}{last.resnum}{last.icode}{seg}')
+    if 'lettered' in how:
+        rows += [f'  ({LETTERS[c]} has no residues between {one} and {two}: taken as one chain with a missing stretch)'
+                 for c, one, two in bridged[:6]]
     return atoms, index, f'Chains ({how}):\n' + '\n'.join(rows)
 
 
@@ -1048,8 +1117,20 @@ def _read_trajectory(top: str, traj: Optional[str], chains, stride: int = 1, max
         keep = keep[np.linspace(0, len(keep) - 1, max_frames).round().astype(int)]
     b_sel, unit = (atoms.chain == b).values, atoms.unit.values
     frames, times, unwrapped = [], [], False
+    check = _SideChains(u) if traj else None
+
+    def other_run(wrong):
+        return ValueError(
+            f'{traj} does not belong to {top}: {wrong}. ' +
+            ('The frames before fit the topology: was the trajectory joined from runs that were set up '
+             'differently?' if check.before >= check.BLOCK else
+             'The two files list the atoms in a different order (written by different programs?) or are '
+             'different systems.') + ' Give the topology the trajectory was run with.')
     for i in keep:
         ts = u.trajectory[i]
+        wrong = check and check.frame(ts)
+        if wrong:
+            raise other_run(wrong)
         xyz = ts.positions[index].astype(float)
         box = None
         if ts.dimensions is not None and ts.dimensions[:3].min() > 0:
@@ -1063,6 +1144,9 @@ def _read_trajectory(top: str, traj: Optional[str], chains, stride: int = 1, max
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')   # "Reader has no dt information" for single structures
             times.append(ts.time)
+    wrong = check and check.close()
+    if wrong:
+        raise other_run(wrong)
     if unwrapped:
         log.append('Periodic box: chains were made whole and put back next to each other')
     times = np.array(times, dtype=float)
@@ -1133,6 +1217,8 @@ def fep(top: str, windows: Sequence[str], chains: Optional[Sequence[str]] = None
     stacks, lam, log, wat = [], [], [], [] if waters else None
     try:
         table = pd.read_csv(dg) if dg else None
+    except UnicodeDecodeError as e:
+        raise ValueError(f'--dg {dg}: not a text file; a CSV table is needed') from e
     except (OSError, ValueError) as e:      # pandas' "No columns to parse from file" does not say which file
         raise ValueError(f'--dg {dg}: {getattr(e, "strerror", None) or str(e).rstrip(".")}') from e
     if table is not None and len(table) != len(windows):
@@ -1140,6 +1226,14 @@ def fep(top: str, windows: Sequence[str], chains: Optional[Sequence[str]] = None
     if table is not None and 'dG' not in table:
         raise ValueError(f'{dg} needs a column called dG (cumulative free energy per window); it has '
                          f'{list(table.columns)}')
+    for column in ('dG', 'lambda') if table is not None else ():
+        if column in table:
+            values = pd.to_numeric(table[column], errors='coerce')
+            bad = np.where(~np.isfinite(values))[0]
+            if len(bad):
+                raise ValueError(f'--dg {dg}: the {column} column needs a number in every row; row {bad[0] + 1} '
+                                 f'holds {str(table[column].iloc[bad[0]])!r}')
+            table[column] = values.astype(float)
     lambdas = table['lambda'].values if table is not None and 'lambda' in table else \
         np.linspace(0, 1, len(windows))
     for k, w in enumerate(windows):
