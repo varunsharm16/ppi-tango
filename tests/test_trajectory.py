@@ -1,5 +1,7 @@
 """Trajectory input the way MD programs write it: no chain IDs, wrapped across the periodic box, force-field
 atom and residue names. Every variant must give the contacts the plain PDB gives."""
+import re
+
 import numpy as np
 import pytest
 
@@ -321,19 +323,23 @@ def _reverse_side_chain(names):
 @pytest.mark.parametrize('change, only, at, frames, said', [
     (_reverse_side_chain, None, None, FRAMES, 'in frame 1 the bonded atoms CB and CG of .* more bonds are off'),
     (_swap('NE', 'NH1'), ('ARG',), None, FRAMES, 'in frame 1 the bonded atoms .* of ARG'),
-    (_swap('OD1', 'ND2'), ('ASN',), None, FRAMES, 'in ASN, .*OD1 and ND2 have changed places'),
-    (_swap('OE1', 'NE2'), ('GLN',), None, FRAMES, 'OE1 and NE2 have changed places'),
+    # 0.1 Å between the two bonds: with four frames all residues of the kind together tell
+    (_swap('OD1', 'ND2'), ('ASN',), None, FRAMES, r'over the 4 frames read, in the \d+ ASN, .*OD1 and ND2 have'),
+    (_swap('OE1', 'NE2'), ('GLN',), None, FRAMES, r'in the \d+ GLN, .*OE1 and NE2 have changed places'),
     (_swap('OG1', 'CG2'), ('THR',), None, FRAMES, 'OG1 and CG2 have changed places'),
     # one residue only, at the interface and far from it: every residue is judged on its own
     (_reverse_side_chain, None, 'A  62', FRAMES, 'CB and CG of LYS 62 of chain A are'),
     (_reverse_side_chain, None, 'D  54', FRAMES, 'of ARG 54 of chain D are'),
     (_swap('CD1', 'CD2'), None, 'A  35', FRAMES, 'of TRP 35 of chain A are'),
-    (_swap('OD1', 'ND2'), None, 'A  58', 12, r'in the frames read from 1 to \d+, in ASN 58 of chain A, .*OD1 and ND2'),
-    (_swap('OE1', 'NE2'), None, 'D  72', 12, 'in GLN 72 of chain D, .*OE1 and NE2'),
-    (_swap('OG1', 'CG2'), None, 'A  26', 12, 'in THR 26 of chain A, .*OG1 and CG2'),
+    (_swap('CB', 'OG'), None, 'A  38', FRAMES, 'CA and CB of SER 38 of chain A are'),
+    (_swap('C', 'O'), None, 'A  59', FRAMES, 'CA and C of ARG 59 of chain A are'),
+    (_swap('N', 'CA'), None, 'A  27', FRAMES, 'of LYS 27 of chain A are'),
+    (_swap('OD1', 'ND2'), None, 'A  58', 20, 'over the 20 frames read, in ASN 58 of chain A, .*OD1 and ND2'),
+    (_swap('OE1', 'NE2'), None, 'D  72', 20, 'in GLN 72 of chain D, .*OE1 and NE2'),
+    (_swap('OG1', 'CG2'), None, 'A  26', 20, 'in THR 26 of chain A, .*OG1 and CG2'),
 ])
-def test_side_chains_in_another_order_are_refused(tmp_path, change, only, at, frames, said):
-    """Backbone and CB in place, the atoms beyond them not: only the side-chain bonds tell."""
+def test_atoms_in_another_order_are_refused(tmp_path, change, only, at, frames, said):
+    """The first frame's backbone as a whole looks right: only the bonds of each residue tell."""
     other = _renamed(tmp_path / 'other.pdb', change, only, at)
     with pytest.raises(ValueError, match=f'does not belong to .*: .*{said}'):
         ensembles.md(other, TRAJ, chains=['A', 'D'], max_frames=frames)
@@ -362,6 +368,29 @@ def test_trajectory_that_turns_wrong_later_is_refused(tmp_path):
     with pytest.raises(ValueError, match='in frame 13 the bonded atoms .* of LYS 62 .*The frames before fit'):
         ensembles.md(TOP, joined, chains=['A', 'D'], max_frames=None)
 
+    def backbone(u, ts):     # the backbone is measured in every frame too, not in the first alone
+        xyz = ts.positions.copy()
+        if ts.frame >= 1:
+            c, o = u.select_atoms('protein and name C').indices, u.select_atoms('protein and name O').indices
+            xyz[c], xyz[o] = ts.positions[o], ts.positions[c]
+        return xyz
+    joined = _rewritten(tmp_path / 'backbone.dcd', backbone, 6)
+    with pytest.raises(ValueError, match='in frame 2 the bonded atoms CA and C of .* more bonds are off'):
+        ensembles.md(TOP, joined, chains=['A', 'D'], max_frames=None)
+
+
+def test_noisy_coordinates_are_not_taken_for_a_wrong_trajectory(tmp_path):
+    """A correct run stored coarsely (0.1 Å, xtc precision 100) or with 0.05 Å of noise on every coordinate
+    spreads the bond lengths: the Asn, Gln and Thr rule asks for more in step, and no bond leaves its 0.4 Å."""
+    rng = np.random.default_rng(1)
+    for name, change in (('coarse', lambda u, ts: np.round(ts.positions, 1)),
+                         ('noisy', lambda u, ts: ts.positions + rng.normal(0, 0.05, ts.positions.shape))):
+        path = _rewritten(tmp_path / f'{name}.dcd', change, 200)
+        assert ensembles.md(TOP, path, chains=['A', 'D'], max_frames=None).n_frames == 200
+    path = _rewritten(tmp_path / 'spot.dcd', lambda u, ts: np.round(ts.positions), 2)
+    with pytest.raises(ValueError, match='on the same spot: were the coordinates stored with very few digits'):
+        ensembles.md(TOP, path, chains=['A', 'D'])
+
 
 def test_residues_cut_by_the_box_are_not_taken_for_a_wrong_trajectory(tmp_path, reference):
     """A raw trajectory has every atom put into the box on its own. With a box face through each of the three
@@ -389,8 +418,8 @@ def test_force_field_files_pass_the_side_chain_check():
     for top, traj in (('gromacs/md.gro', 'gromacs/md.xtc'), ('amber/complex.prmtop', 'amber/md.nc'),
                       ('charmm/complex.psf', 'charmm/md.dcd')):
         u = ensembles._universe(f'examples/formats/{top}', f'examples/formats/{traj}')
-        check = ensembles._SideChains(u)
-        assert len(check.i) > 600 and len(check.pairs) == 3
+        check = ensembles._Bonds(u)
+        assert len(check.i) > 1300 and len(check.pairs) == 3
         assert [check.frame(ts) for ts in u.trajectory] == [None] * len(u.trajectory) and check.close() is None
 
 
@@ -411,6 +440,12 @@ def test_missing_residues_do_not_split_a_chain(tmp_path):
     (tmp_path / 'some.pdb').write_text(''.join(some))
     table = '\n'.join(ensembles.nma(str(tmp_path / 'some.pdb'), frames=4).log)
     assert 'some atoms have no chain ID' in table and 'A: 108 residues, VAL3 to ARG110' in table
+    # a long missing stretch is one too, as long as its residues could span it (no limit on their number)
+    long = [l for l in lines if not (l.startswith('ATOM') and 20 <= int(l[22:26]) <= 60
+                                     and l[6:11] < ' 1000' and not l.startswith('TER'))]
+    (tmp_path / 'long.pdb').write_text(''.join(long))
+    table = '\n'.join(ensembles.nma(str(tmp_path / 'long.pdb'), frames=4).log)
+    assert 'A has no residues between ' in table and table.count(' residues, ') == 6
 
 
 def test_calpha_only_model_is_refused_with_the_reason(tmp_path):
@@ -420,6 +455,15 @@ def test_calpha_only_model_is_refused_with_the_reason(tmp_path):
         ensembles.nma(str(only), frames=4)
     with pytest.raises(ValueError, match='Cα-only and coarse-grained models are not read'):
         ensembles.nma(str(only), chains=['A', 'D'], frames=4)
+    backbone = ('N', 'CA', 'C', 'O', 'CB')
+    only.write_text(''.join(l for l in open(TOP) if not l.startswith('ATOM') or l[12:16].strip() in backbone))
+    with pytest.raises(ValueError, match='165 of 165 residues have no side-chain atoms: this is a backbone model'):
+        ensembles.nma(str(only), frames=4)
+    some = [l for l in open(TOP) if not (l.startswith('ATOM') and l[21] == 'A' and 20 <= int(l[22:26]) < 30
+                                         and l[12:16].strip() not in backbone and l[76:78].strip() != 'H')]
+    only.write_text(''.join(some))
+    log = ' '.join(ensembles.nma(str(only), frames=4).log)
+    assert re.search(r'\d of 165 residues have no side-chain atoms in the file', log)
 
 
 def test_pdb_without_chain_ids_gets_its_chains_lettered(tmp_path):

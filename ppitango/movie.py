@@ -285,8 +285,7 @@ def render(scene: Scene, output: str, seconds: float = 12.0, fps: int = 30, titl
 
 
 def _encoder_stopped(output: str) -> OSError:
-    return OSError(f'could not write {output}: the video encoder (ffmpeg) stopped. Is the disk full, or the file '
-                   'not writable?')
+    return OSError(0, 'the video encoder (ffmpeg) stopped. Is the disk full, or the file not writable?', output)
 
 
 def to_gif(mp4: str, width: int = 960, fps: int = 12) -> str:

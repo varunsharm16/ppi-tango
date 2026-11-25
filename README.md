@@ -81,10 +81,12 @@ trajectory (xtc, trr, dcd, nc ...). Nothing needs preparing by hand:
   is followed. Files without chain IDs (gro, prmtop, most psf), or with IDs on some atoms only, get their
   chains lettered A, B, C ... in file order, and the table is printed so you can pick. A new chain starts at
   a `TER` record, where the residue numbers start again, where the segment changes, and where the backbone
-  is not bonded to the residue before. One exception: a hole in the numbering of up to 30 residues that the
-  missing residues could span (3.8 Å each) is a loop the structure does not show, not a new chain, and the
-  table says so. Two chains whose numbers run on with such a hole and whose ends sit that close would be
-  taken for one: name the sides with `--select` then.
+  is not bonded to the residue before. One exception: a hole in the numbering that the missing residues
+  could span (3.8 Å each) is a loop the structure does not show, not a new chain, and the table says so.
+  In a file without `TER` records, two chains whose numbers run on (one ends at 110, the next starts at
+  201) are taken for one that way, and so are the pieces of a cleaved protein (chymotrypsin, 1CHO): read
+  the table, and name the sides with `--select` when it is wrong. With `TER` records the pieces of a
+  cleaved protein are separate chains, and the pair with most contacts may be two of them.
 
   ```
   Chains (no chain IDs in the topology: chains lettered in file order, split where the backbone breaks):
@@ -118,17 +120,25 @@ trajectory (xtc, trr, dcd, nc ...). Nothing needs preparing by hand:
   `--dt` (time between saved frames, with `--unit`), or the axis counts frames.
 - **Topology and trajectory must be of the same run.** The same protein set up by two programs lists its
   atoms in a different order (GROMACS puts a residue's C and O last, OpenMM and the PDB before the side
-  chain), and coordinates would then land on the wrong atoms. ppi-tango measures the backbone bonds in the
-  first frame, and every side-chain bond of every residue in each frame it reads (across the periodic box,
-  so residues cut by a box face are fine). It stops at the first bond more than 0.4 Å off its usual length
-  and names the residue and the frame, also when a trajectory fits at first and not later (two runs joined).
-  An amide oxygen and nitrogen (Asn, Gln), or the oxygen and methyl group of Thr, that have changed places
-  differ by 0.1 Å only: those are found from the mean over five frames read in a row, so a swap that lasts
-  fewer than five read frames, or sits in frames that `--stride` and `--max-frames` skip, can go unseen.
-  It cannot see atoms swapped within a symmetric group (the two oxygens of Asp or Glu, the ring sides of
-  Phe and Tyr, the methyl groups of Val and Leu, the end nitrogens of Arg) or a flipped His ring: the bond
-  lengths are the same. Nucleotides, and residues with other names than the twenty standard ones and their
-  force-field variants, are measured along the backbone only, in the first frame.
+  chain), and coordinates would then land on the wrong atoms. In each frame it reads, ppi-tango measures
+  the bonds of every amino acid: N-CA, CA-C, C-O, CA-CB and those of the side chain, across the periodic
+  box, so residues cut by a box face are fine. It stops at the first bond more than 0.4 Å off its usual
+  length and names the residue and the frame, also when a trajectory fits at first and not later (two runs
+  joined). What this cannot see:
+  - An amide oxygen and nitrogen (Asn, Gln), or the oxygen and methyl group of Thr, that have changed
+    places: the two bonds differ by 0.1 Å, less than a bond moves in one frame. These are judged once, over
+    all frames read, per residue and for all residues of a kind together: the bond that should be shorter
+    has to be longer on average, by 0.045 Å at least and by six times the uncertainty of that average.
+    A swap in a few residues needs some ten frames to show (more in a hot run or with coarsely stored
+    coordinates), and a swap in part of the trajectory only can go unseen.
+  - Atoms swapped within a symmetric group (the two oxygens of Asp or Glu, the ring sides of Phe and Tyr,
+    the methyl groups of Val and Leu, the end nitrogens of Arg) or a flipped His ring: the bond lengths are
+    the same.
+  - Frames that `--stride` and `--max-frames` skip.
+  - Nucleotides, and residues with other names than the twenty standard ones and their force-field
+    variants, beyond their backbone: nucleotides are measured in the first frame only, by kind of bond.
+  - Coordinates stored with one decimal in nm or fewer (xtc precision 10) put bonded atoms on one spot and
+    are refused; two decimals (precision 100) are read.
 - **Long trajectories**: 200 evenly spaced frames are analysed (`--max-frames`, `--stride`), and only those
   are read, so trajectory length hardly matters.
 
@@ -142,8 +152,8 @@ ppitango fep top.pdb window_*.dcd --chains A D --dg dg.csv --label "barstar Y29 
 
 `dg.csv` has one row per window and a `dG` column (cumulative free energy, kcal/mol, from
 alchemlyb / pymbar / your FEP package). The free energy curve is drawn against λ next to the
-contacts that go with it. An optional `lambda` column gives each window's λ; without it the windows are
-spaced evenly from 0 to 1. The frames of a window are spread over the stretch to the next window so that the
+contacts that go with it. An optional `lambda` column gives each window's λ, rising from row to row; without
+it the windows are spaced evenly from 0 to 1. The frames of a window are spread over the stretch to the next window so that the
 axis keeps moving: the λ shown for a frame is where it sits on that path, not a λ it was simulated at (all
 frames of window 3 were run at the λ of window 3).
 
@@ -309,8 +319,10 @@ the contacts of the reference run (`tests/test_trajectory.py` keeps the core of 
 
 What does not work, or needs care:
 
-- **Cα-only and coarse-grained models** are not read: a residue is recognised by its N and CA atoms (or a
-  sugar C4'), and the contacts need all heavy atoms.
+- **Cα-only, backbone-only and coarse-grained models** are not read: a residue is recognised by its N and
+  CA atoms (or a sugar C4'), and the contacts need all heavy atoms. A model whose residues have no side
+  chains stops with that message; when only some are cut short (unresolved side chains of a crystal
+  structure), the run says how many, and those residues show backbone contacts only.
 - **A trajectory for an unusual part of the system.** A trajectory and a topology with different atom
   counts are matched up as described above. A custom index group (one chain of several, a hand-picked
   region) is not recognised and stops with an error saying both counts: write the topology for that group
@@ -325,7 +337,7 @@ What does not work, or needs care:
   `.gro` (`gmx editconf -f md.tpr -o md.gro`) and give that, or `pip install -U MDAnalysis`.
 - **Residue numbers of a lone `.tpr` or a plain `prmtop`** run straight through the chains (see above):
   keep the `.gro` next to the `.tpr`, or use `--renumber`.
-- **xtc rounds coordinates to 0.01 Å.** A contact sitting exactly on a cutoff can differ between an xtc and
+- **xtc rounds coordinates to 0.01 Å** at its usual precision (1000), and more coarsely at a lower one. A contact sitting exactly on a cutoff can differ between an xtc and
   a full-precision file of the same run; occupancies are not affected in any way that shows.
 - **Ligands, ions, sugars and lipids are a side only on their own.** A side cannot mix protein with its
   ligand or its glycans. For such a side ppi-tango reports PandaPPI's hydrogen bonds (by distance between

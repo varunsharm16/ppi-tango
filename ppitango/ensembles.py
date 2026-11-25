@@ -44,6 +44,19 @@ class Ensemble:
             self.atoms = self.atoms.assign(resid=self.atoms.resnum.astype(str))
         if 'kind' not in self.atoms:
             self.atoms = self.atoms.assign(kind='protein')
+        # amino acids that should have a side chain beyond CB and have none in the file
+        a = self.atoms[self.atoms.resname.isin(list(SIDE_BONDS))]
+        if len(a):
+            key = [a.chain, a.resid]
+            bare = ~(~a.name.isin(['N', 'CA', 'C', 'O', 'OXT', 'CB'])).groupby(key, sort=False).any()
+            if bare.mean() > 0.9:
+                raise ValueError(f'{int(bare.sum())} of {len(bare)} residues have no side-chain atoms: this is a '
+                                 'backbone model. The contacts need all heavy atoms; build the side chains '
+                                 'first (PDBFixer, Modeller, SCWRL)')
+            if bare.any():
+                one = int(bare.sum()) == 1
+                self.log.append(f'{int(bare.sum())} of {len(bare)} residues {"has" if one else "have"} no side-chain '
+                                f'atoms in the file: {"it" if one else "they"} can only show backbone contacts')
 
     @property
     def labels(self) -> pd.Series:
@@ -628,30 +641,38 @@ SHORTER = {'ASN': (('CG', 'OD1'), ('CG', 'ND2')), 'GLN': (('CD', 'OE1'), ('CD', 
            'THR': (('CB', 'OG1'), ('CB', 'CG2'))}
 
 
-class _SideChains:
-    """Do the side chains sit under their own atom names, in every frame that is read? `_misfit` looks at the
-    backbone and CB of the first frame only; a topology that lists the atoms of a side chain in another order
-    than the trajectory passes it and puts every coordinate beyond CB on the wrong atom.
+BACKBONE_BONDS = [('N', 'CA', 1.46), ('CA', 'C', 1.52), ('C', 'O', 1.23), ('CA', 'CB', 1.53)]
 
-    Every side-chain bond of every residue is measured in each frame given to `frame`, across the periodic box
-    (a residue cut by a box face is whole to this check). A bond more than 0.4 Å off its usual length is a
-    wrong atom: no force field stretches a bond that far, and the nearest non-bonded atom is 0.9 Å further.
-    An amide oxygen and nitrogen, or the oxygen and methyl group of Thr, differ by 0.1 Å only, which is within
-    the vibration of one bond in one frame: those are told apart by the mean over five frames in a row (in
-    correct runs that mean stays 0.07 Å away from the limit).
-    `frame` and `close` return None when all is well, else what is not."""
-    TOLERANCE, BLOCK, LONGER = 0.4, 5, 0.03
+
+class _Bonds:
+    """Does every atom sit under its own name, in every frame that is read? `_misfit` looks at the first frame
+    and at whole kinds of bond; a topology that lists the atoms of some residues in another order than the
+    trajectory passes it and puts coordinates on the wrong atoms.
+
+    The bonds of the backbone and of the side chain of every amino acid are measured in each frame given to
+    `frame`, across the periodic box (a residue cut by a box face is whole to this check). A bond more than
+    0.4 Å off its usual length is a wrong atom: no force field stretches a bond that far, and the nearest
+    non-bonded atom is 0.9 Å further.
+
+    An amide oxygen and nitrogen, or the oxygen and methyl group of Thr, differ by 0.1 Å only, less than one
+    bond moves in one frame. `close` judges those over all frames read: the shorter bond has to come out
+    longer on average, by half the 0.1 Å at least and by six times the uncertainty of that average as the frames
+    themselves show it. A hot
+    run or coarsely stored coordinates widen the spread and with it what is asked for, so noise alone does not
+    refuse a file. `frame` and `close` return None when all is well, else what is not."""
+    TOLERANCE, SURE, LONGER = 0.4, 6.0, 0.045
 
     def __init__(self, u):
-        from collections import deque
         self.u = u
         names, resnames, resix = _attr(u.atoms, 'names'), _attr(u.atoms, 'resnames'), u.atoms.resindices
         i, j, length, self.what, self.pairs = [], [], [], [], []
         if names is not None and resnames is not None:
             same = {pair: canonical(*pair) for pair in set(zip(resnames, names))}
             canon = np.array([same[p] for p in zip(resnames, names)])
-            for res, bonds in SIDE_BONDS.items():
-                of = np.where(canon[:, 0] == res)[0]
+            amino = np.isin(resix, resix[canon[:, 1] == 'CA']) & np.isin(resix, resix[canon[:, 1] == 'N'])
+            kinds = [(None, np.where(amino)[0], BACKBONE_BONDS)] + \
+                [(res, np.where(amino & (canon[:, 0] == res))[0], bonds) for res, bonds in SIDE_BONDS.items()]
+            for res, of, bonds in kinds:
                 found = {}
                 for one, two, usual in bonds if len(of) else ():
                     # residues with exactly one atom of each name (alternate locations and cut residues drop out)
@@ -665,7 +686,7 @@ class _SideChains:
                         found[(one, two)] = (both, len(self.what) + np.arange(len(both)))
                         i.append(ends[0][1][a]); j.append(ends[1][1][b])
                         length += [usual] * len(both)
-                        self.what += [(res, one, two)] * len(both)
+                        self.what += [(one, two)] * len(both)
                 short, long = SHORTER.get(res, (None, None))
                 if short in found and long in found:
                     _, a, b = np.intersect1d(found[short][0], found[long][0], return_indices=True)
@@ -673,12 +694,13 @@ class _SideChains:
                         self.pairs.append((res, short, long, found[short][1][a], found[long][1][b]))
         self.i, self.j = (np.concatenate(x) if x else np.zeros(0, int) for x in (i, j))
         self.length = np.array(length)
-        self.last, self.fresh, self.frames, self.before = deque(maxlen=self.BLOCK), 0, [], 0
+        self.frames, self.sum, self.squares = 0, np.zeros(len(self.i)), np.zeros(len(self.i))
+        self.sums = [[np.zeros(len(a)), np.zeros(len(a))] for *_, a, _ in self.pairs]
 
     def _residue(self, k):
         atom = self.u.atoms[int(self.i[k])]
         chain = getattr(atom, 'chainID', '') or ''
-        return f'{self.what[k][0]} {atom.resid}' + (f' of chain {chain}' if chain.strip() else '')
+        return f'{atom.resname} {atom.resid}' + (f' of chain {chain}' if chain.strip() not in ('', 'X') else '')
 
     def frame(self, ts):
         if not len(self.i):
@@ -688,38 +710,41 @@ class _SideChains:
         d = calc_bonds(ts.positions[self.i], ts.positions[self.j], box=box)
         off = np.where(np.abs(d - self.length) > self.TOLERANCE)[0]
         if len(off):
-            self.before = len(self.frames)
             k = off[np.abs(d - self.length)[off].argmax()]
-            res, one, two = self.what[k]
+            one, two = self.what[k]
             return (f'in frame {ts.frame + 1} the bonded atoms {one} and {two} of {self._residue(k)} are '
-                    f'{d[k]:.1f} Å apart ({self.length[k]:.1f} Å in a real {res})'
+                    f'{d[k]:.1f} Å apart ({self.length[k]:.1f} Å when they are bonded)'
                     + (f', and {len(off) - 1} more bonds are off' if len(off) > 1 else '')
                     + ('. The trajectory holds no box: if its molecules were wrapped into the periodic box, '
-                       'that cannot be undone' if box is None and d[k] > 10 else ''))
-        self.last.append(d)
-        self.frames.append(ts.frame + 1)
-        self.fresh += 1
-        return self._changed_places() if self.fresh == self.BLOCK else None
+                       'that cannot be undone' if box is None and d[k] > 10 else '')
+                    + ('. Bonded atoms sit on the same spot: were the coordinates stored with very few digits?'
+                       if (d[off] < 0.3).any() else ''))
+        self.frames += 1
+        for (_, _, _, a, b), sums in zip(self.pairs, self.sums):
+            sums[0] += d[a] - d[b]
+            sums[1] += (d[a] - d[b]) ** 2
+        return None
 
     def close(self):
-        return self._changed_places() if self.fresh else None
-
-    def _changed_places(self):
-        d, frames = np.array(self.last), self.frames[-len(self.last):]
-        self.fresh, self.before = 0, len(self.frames) - len(d)
-        for res, short, long, a, b in self.pairs:
-            diff = d[:, a] - d[:, b]
-            if len(d) >= self.BLOCK:  # enough frames to judge each residue on its own
-                bad = np.where(diff.mean(0) > self.LONGER)[0]
-                who = f'{self._residue(a[bad[0]])}' + (f' and {len(bad) - 1} more' if len(bad) > 1 else '') \
-                    if len(bad) else ''
-            else:                     # a few frames only: all residues of the kind together
-                bad = [0] if diff.size >= 5 and np.median(diff) > 0 else []
-                who = res
-            if len(bad):
-                return (f'in the frames read from {frames[0]} to {frames[-1]}, in {who}, the bond {short[0]}-{short[1]} is '
-                        f'longer than {long[0]}-{long[1]}, which it never is: {short[1]} and {long[1]} have '
-                        'changed places')
+        """The Asn, Gln and Thr rule, over all frames read: for each residue, and for all of a kind together
+        (which is what tells when there are few frames)."""
+        n = self.frames
+        for (res, short, long, a, _), (total, squares) in zip(self.pairs, self.sums):
+            def longer(total, squares, count):
+                mean = total / count
+                spread = np.sqrt(np.maximum(squares / count - mean ** 2, 0) / max(count - 1, 1))
+                return (mean > self.LONGER) & (mean > self.SURE * spread)
+            each = np.where(longer(total, squares, n))[0] if n >= 5 else []
+            if len(each):
+                who = self._residue(a[each[0]]) + (f' and {len(each) - 1} more' if len(each) > 1 else '')
+                by = total[each[0]] / n
+            elif n * len(a) >= 5 and longer(total.sum(), squares.sum(), n * len(a)):
+                who, by = f'the {len(a)} {res}', total.sum() / (n * len(a))
+            else:
+                continue
+            return (f'over the {n} frame{"s" * (n > 1)} read, in {who}, the bond {short[0]}-{short[1]} is {by:.2f} Å '
+                    f'longer than {long[0]}-{long[1]} on average; it is 0.1 Å shorter in a real {res}: '
+                    f'{short[1]} and {long[1]} have changed places')
         return None
 
 
@@ -854,7 +879,9 @@ def _polymer(u, renumber: Optional[dict] = None, extra=None):
         keep &= np.isin(altloc, ('', 'A'))
     index = np.where(keep)[0]
     if not len(index):
-        raise ValueError(NO_POLYMER)
+        import os
+        file = getattr(u, 'filename', None)
+        raise ValueError((f'{os.path.basename(file)}: ' if isinstance(file, str) else '') + NO_POLYMER)
 
     ribose = has("O2'", 'O2*')[resix[index]]
     kind = np.where(protein[resix[index]], 'protein', np.where(nucleic[resix[index]], 'nucleic', 'other'))
@@ -896,9 +923,11 @@ def _polymer(u, renumber: Optional[dict] = None, extra=None):
                 gap = calc_bonds(xyz[tail[prev]][None], xyz[head[cur]][None],
                                  box=box if box is not None and box[:3].min() > 0 else None)[0]
                 # residues missing from a structure (a loop the crystal does not show) leave a hole in the
-                # numbering that the missing residues can span, 3.8 Å each: that is one chain, not two
+                # numbering that the missing residues can span, 3.8 Å each: that is one chain, not two. A limit
+                # on the number of residues would cut real chains (1A0R lacks 30 in a row); what is merged is
+                # printed, and taking two chains for one fails loudly where taking one for two does not
                 step = resnum[s] - resnum[s - 1]
-                hole = gap > 2.5 and 1 < step <= 30 and gap <= 3.8 * step
+                hole = gap > 2.5 and step > 1 and gap <= 3.8 * step
                 new = gap > 2.5 and not hole
                 if hole:
                     bridged.append((k, f'{resname[s - 1]}{resnum[s - 1]}', f'{resname[s]}{resnum[s]}'))
@@ -907,7 +936,8 @@ def _polymer(u, renumber: Optional[dict] = None, extra=None):
         if k + 1 > len(LETTERS):
             raise ValueError(f'{k + 1} separate chains found; choose the two sides with --select')
         chain = np.array([LETTERS[label[r]] for r in res_of])
-        how = ('some atoms have no chain ID' if (chain_id != '').any() else 'no chain IDs in the topology') + \
+        how = ('some atoms have no chain ID' if len(set(chain_id) - {'', 'X', 'SYSTEM'}) else
+               'no chain IDs in the topology') + \
             ': chains lettered in file order, split where the backbone breaks'
 
     atoms = pd.DataFrame({'chain': chain, 'segid': segid, 'resname': resname, 'resnum': resnum, 'name': name,
@@ -931,12 +961,15 @@ def _polymer(u, renumber: Optional[dict] = None, extra=None):
     return atoms, index, f'Chains ({how}):\n' + '\n'.join(rows)
 
 
-def _closest_pair(atoms: pd.DataFrame, xyz: np.ndarray, box) -> tuple:
+def _closest_pair(atoms: pd.DataFrame, xyz: np.ndarray, box, note: str = '') -> tuple:
     """The two chains with the most atoms in contact (4.5 Å), counting across the periodic box."""
     from MDAnalysis.lib.distances import capped_distance
     ids = list(dict.fromkeys(atoms.chain))
     if len(ids) < 2:
-        raise ValueError(f'Only one chain found ({ids[0]}); an interface needs two')
+        raise ValueError(f'Only one chain found ({ids[0]}); an interface needs two'
+                         + ('. Stretches without residues were taken for missing loops of one chain: if they are '
+                            'separate chains, name the two sides with --select' if note and 'missing stretch' in note
+                            else ''))
     box = box if box is not None and box[:3].min() > 0 else None
     chain = atoms.chain.values
     best, pair = -1, None
@@ -1016,7 +1049,7 @@ def _sides(u, chains, select, renumber=None):
                 raise ValueError(f'Chain {" and ".join(missing)} not found.\n{table}\n'
                                  'Pick two of these with --chains, or describe the two sides with --select.')
         else:
-            a, b = _closest_pair(atoms, u.atoms.positions[index].astype(float), u.trajectory.ts.dimensions)
+            a, b = _closest_pair(atoms, u.atoms.positions[index].astype(float), u.trajectory.ts.dimensions, table)
             log.append(table)
             log.append(f'Following chains {a} and {b} (the pair with most contacts); choose others with --chains')
         if 'lettered' in table and chains:
@@ -1117,13 +1150,13 @@ def _read_trajectory(top: str, traj: Optional[str], chains, stride: int = 1, max
         keep = keep[np.linspace(0, len(keep) - 1, max_frames).round().astype(int)]
     b_sel, unit = (atoms.chain == b).values, atoms.unit.values
     frames, times, unwrapped = [], [], False
-    check = _SideChains(u) if traj else None
+    check = _Bonds(u) if traj else None
 
     def other_run(wrong):
         return ValueError(
             f'{traj} does not belong to {top}: {wrong}. ' +
             ('The frames before fit the topology: was the trajectory joined from runs that were set up '
-             'differently?' if check.before >= check.BLOCK else
+             'differently?' if check.frames >= 5 and 'in frame' in wrong else
              'The two files list the atoms in a different order (written by different programs?) or are '
              'different systems.') + ' Give the topology the trajectory was run with.')
     for i in keep:
@@ -1216,6 +1249,15 @@ def fep(top: str, windows: Sequence[str], chains: Optional[Sequence[str]] = None
     """
     stacks, lam, log, wat = [], [], [], [] if waters else None
     try:
+        if dg:
+            import csv
+            with open(dg, newline='') as f:
+                rows = [row for row in csv.reader(f) if row]
+            odd = [k for k, row in enumerate(rows[1:], 1) if len(row) != len(rows[0])]
+            if odd:     # pandas would shift the columns: 0,5 for a half is two values
+                raise ValueError(f'row {odd[0]} holds {len(rows[odd[0]])} values and the header names '
+                                 f'{len(rows[0])} columns. Values are separated by commas, decimals written with '
+                                 'a point')
         table = pd.read_csv(dg) if dg else None
     except UnicodeDecodeError as e:
         raise ValueError(f'--dg {dg}: not a text file; a CSV table is needed') from e
@@ -1231,9 +1273,14 @@ def fep(top: str, windows: Sequence[str], chains: Optional[Sequence[str]] = None
             values = pd.to_numeric(table[column], errors='coerce')
             bad = np.where(~np.isfinite(values))[0]
             if len(bad):
+                held = table[column].iloc[bad[0]]
                 raise ValueError(f'--dg {dg}: the {column} column needs a number in every row; row {bad[0] + 1} '
-                                 f'holds {str(table[column].iloc[bad[0]])!r}')
+                                 + ('is empty' if pd.isna(held) else f'holds {str(held)!r}'))
             table[column] = values.astype(float)
+    if table is not None and 'lambda' in table and not (np.diff(table['lambda']) > 0).all():
+        raise ValueError(f'--dg {dg}: the lambda column has to rise from one row to the next (it holds '
+                         f'{", ".join(f"{v:g}" for v in table["lambda"][:4])}{" ..." * (len(table) > 4)}). Give '
+                         'the windows in the order of rising lambda, or leave the column out to space them evenly')
     lambdas = table['lambda'].values if table is not None and 'lambda' in table else \
         np.linspace(0, 1, len(windows))
     for k, w in enumerate(windows):

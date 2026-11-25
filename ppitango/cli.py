@@ -1,5 +1,6 @@
 """Command line: ppitango nma | md | fep."""
 import argparse
+import contextlib
 import math
 import os
 import sys
@@ -145,6 +146,8 @@ def main(argv=None):
         args.trajectory or args.topology
     try:
         renumber = {c: int(n) for c, n in (item.split(':') for item in args.renumber)} or None
+        if renumber and '' in renumber:
+            raise ValueError
     except ValueError:
         parser.error('--renumber takes CHAIN:FIRST items, e.g. --renumber A:3 B:1')
     prefix = _prefix(args.output, f'{os.path.splitext(os.path.basename(source))[0]}_{args.command}')
@@ -163,13 +166,25 @@ def main(argv=None):
         sys.unraisablehook = lambda *_: None   # a reader that could not open its file complains again when dropped
         sys.exit(f'ppitango: {e}')
 
+    _work(args, ens, prefix)
+
+
+@contextlib.contextmanager
+def _writing(what, *files):
+    """One line instead of a traceback when a file cannot be written (disk full, quota), saying which: the
+    error of a failed write carries no file name, so each step says what it was writing. Files the step left
+    half written are removed."""
     try:
-        _work(args, ens, prefix)
+        yield
     except OSError as e:
-        sys.exit(f'ppitango: {e.strerror or e}' + (f': {e.filename}' if e.filename else ''))
+        for file in files:
+            with contextlib.suppress(OSError):
+                os.remove(file)
+        sys.exit(f'ppitango: could not write {e.filename or what}: {e.strerror or e}')
 
 
 def _work(args, ens, prefix):
+    scratch = f'temporary files in {tempfile.gettempdir()}'
     a, b = ens.chains
     for line in ens.log:
         print(line)
@@ -177,37 +192,42 @@ def _work(args, ens, prefix):
         sys.exit('ppitango: only one frame was read, so there is nothing to animate. For a single structure use '
                  'ppitango nma, or PandaPPI itself for a static map.')
     print(f'{ens.title}: {ens.pair}, {ens.n_frames} frames, {len(ens.atoms)} heavy atoms')
-    try:
+    with _writing(f'the {scratch} that PandaPPI reads each frame from'):
         result = analysis.analyze(ens, cutoff=args.distance_cutoff, workers=args.workers)
-    except OSError as e:      # PandaPPI reads each frame from a temporary file
-        sys.exit(f'ppitango: the analysis could not write its temporary files in {tempfile.gettempdir()}: '
-                 f'{e.strerror or e}')
     if result.contacts.empty:
         sys.exit(f'ppitango: no contacts between {ens.pair} in any frame - nothing to animate.')
     scene = result.scene(smooth=args.smooth, max_residues=args.max_residues)
-    files = result.save(prefix)
+    with _writing('the tables', f'{prefix}_contacts.csv', f'{prefix}_buried_surface.csv'):
+        files = result.save(prefix)
 
     if not args.no_viewer:
         from . import viewer
-        files.append(viewer.write(scene, f'{prefix}_viewer.html', args.title))
+        with _writing(f'{prefix}_viewer.html', f'{prefix}_viewer.html'):
+            files.append(viewer.write(scene, f'{prefix}_viewer.html', args.title))
     from . import movie
     movies = []
     if not args.no_movie:
         print('  rendering 2D movie ...')
-        movies.append(movie.render(scene, f'{prefix}_contacts.mp4', args.seconds, args.fps, args.title))
+        with _writing(f'{prefix}_contacts.mp4', f'{prefix}_contacts.mp4'):
+            movies.append(movie.render(scene, f'{prefix}_contacts.mp4', args.seconds, args.fps, args.title))
     if args.movie3d:
         from . import movie3d
-        try:
-            movies.append(movie3d.render(scene, f'{prefix}_3d.mp4', args.seconds, title=args.title))
-        except RuntimeError as e:
-            print(f'ppitango: 3D movie skipped: {e}', file=sys.stderr)
-    files += movies + ([movie.to_gif(m) for m in movies] if args.gif else [])
+        with _writing(f'{prefix}_3d.mp4 or its {scratch}', f'{prefix}_3d.mp4'):
+            try:
+                movies.append(movie3d.render(scene, f'{prefix}_3d.mp4', args.seconds, title=args.title))
+            except RuntimeError as e:
+                print(f'ppitango: 3D movie skipped: {e}', file=sys.stderr)
+    files += movies
+    for m in movies if args.gif else ():
+        with _writing(m[:-4] + '.gif', m[:-4] + '.gif'):
+            files.append(movie.to_gif(m))
     if args.blender:
         from . import blender
-        try:
-            files.append(blender.write(scene, f'{prefix}.blend', args.seconds))
-        except RuntimeError as e:
-            print(f'ppitango: Blender scene skipped: {e}', file=sys.stderr)
+        with _writing(f'{prefix}.blend or its {scratch}', f'{prefix}.blend'):
+            try:
+                files.append(blender.write(scene, f'{prefix}.blend', args.seconds))
+            except RuntimeError as e:
+                print(f'ppitango: Blender scene skipped: {e}', file=sys.stderr)
     print('Wrote:')
     for f in files:
         print(f'  {f}')

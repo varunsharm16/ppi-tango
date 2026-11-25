@@ -134,15 +134,20 @@ def test_cli_checks_options_before_working(pdb, tmp_path, capsys):
     with pytest.raises(SystemExit) as e:
         main(['fep', pdb, pdb, '--dg', str(tmp_path / 'none.csv')])
     assert 'none.csv' in str(e.value)
-    with pytest.raises(SystemExit) as e:
-        main(['nma', pdb, '--renumber', 'A:x'])
-    assert e.value.code == 2 and 'CHAIN:FIRST' in capsys.readouterr().err
+    for item in ('A:x', ':3', 'A', 'A:1:2'):
+        with pytest.raises(SystemExit) as e:
+            main(['nma', pdb, '--renumber', item])
+        assert e.value.code == 2 and 'CHAIN:FIRST' in capsys.readouterr().err
     assert os.listdir(tmp_path) == []
-    for text, said in (('window,dG\n0,abc\n1,def\n', "row 1 holds 'abc'"), ('window,dG\n0,0.5\n1,\n', 'row 2')):
+    for text, said in (('window,dG\n0,abc\n1,def\n', "the dG column needs a number in every row; row 1 holds 'abc'"),
+                       ('window,dG\n0,0.5\n1,\n', 'the dG column needs a number in every row; row 2 is empty'),
+                       ('window,dG\n0,0,5\n1,1,5\n', 'row 1 holds 3 values and the header names 2 columns'),
+                       ('lambda,dG\n1,0\n0,1\n', 'the lambda column has to rise'),
+                       ('lambda,dG\n0.5,0\n0.5,1\n', 'the lambda column has to rise')):
         (tmp_path / 'dg.csv').write_text(text)
         with pytest.raises(SystemExit) as e:
             main(['fep', pdb, pdb, pdb, '--dg', str(tmp_path / 'dg.csv'), '-o', str(tmp_path / 'x')])
-        assert 'dg.csv: the dG column needs a number' in str(e.value) and said in str(e.value)
+        assert f'dg.csv: {said}' in str(e.value)
     (tmp_path / 'dg.csv').write_bytes(b'A\xc5\x01\xff\n' * 20)
     with pytest.raises(SystemExit) as e:
         main(['fep', pdb, pdb, pdb, '--dg', str(tmp_path / 'dg.csv'), '-o', str(tmp_path / 'x')])
