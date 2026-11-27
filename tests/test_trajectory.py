@@ -324,7 +324,7 @@ def _reverse_side_chain(names):
     (_reverse_side_chain, None, None, FRAMES, 'in frame 1 the bonded atoms CB and CG of .* more bonds are off'),
     (_swap('NE', 'NH1'), ('ARG',), None, FRAMES, 'in frame 1 the bonded atoms .* of ARG'),
     # 0.1 Å between the two bonds: with four frames all residues of the kind together tell
-    (_swap('OD1', 'ND2'), ('ASN',), None, FRAMES, r'over the 4 frames read, in the \d+ ASN, .*OD1 and ND2 have'),
+    (_swap('OD1', 'ND2'), ('ASN',), None, FRAMES, r'over the 4 frames read from 1 to \d+, in the \d+ ASN, .*OD1 and ND2 have'),
     (_swap('OE1', 'NE2'), ('GLN',), None, FRAMES, r'in the \d+ GLN, .*OE1 and NE2 have changed places'),
     (_swap('OG1', 'CG2'), ('THR',), None, FRAMES, 'OG1 and CG2 have changed places'),
     # one residue only, at the interface and far from it: every residue is judged on its own
@@ -334,7 +334,7 @@ def _reverse_side_chain(names):
     (_swap('CB', 'OG'), None, 'A  38', FRAMES, 'CA and CB of SER 38 of chain A are'),
     (_swap('C', 'O'), None, 'A  59', FRAMES, 'CA and C of ARG 59 of chain A are'),
     (_swap('N', 'CA'), None, 'A  27', FRAMES, 'of LYS 27 of chain A are'),
-    (_swap('OD1', 'ND2'), None, 'A  58', 20, 'over the 20 frames read, in ASN 58 of chain A, .*OD1 and ND2'),
+    (_swap('OD1', 'ND2'), None, 'A  58', 20, r'over the 20 frames read from 1 to \d+, in ASN 58 of chain A, .*OD1 and ND2'),
     (_swap('OE1', 'NE2'), None, 'D  72', 20, 'in GLN 72 of chain D, .*OE1 and NE2'),
     (_swap('OG1', 'CG2'), None, 'A  26', 20, 'in THR 26 of chain A, .*OG1 and CG2'),
 ])
@@ -388,8 +388,58 @@ def test_noisy_coordinates_are_not_taken_for_a_wrong_trajectory(tmp_path):
         path = _rewritten(tmp_path / f'{name}.dcd', change, 200)
         assert ensembles.md(TOP, path, chains=['A', 'D'], max_frames=None).n_frames == 200
     path = _rewritten(tmp_path / 'spot.dcd', lambda u, ts: np.round(ts.positions), 2)
-    with pytest.raises(ValueError, match='on the same spot: were the coordinates stored with very few digits'):
+    with pytest.raises(ValueError, match='spot.dcd: in frame 1 .*stored with too few digits to tell atoms apart') as e:
         ensembles.md(TOP, path, chains=['A', 'D'])
+    assert 'does not belong' not in str(e.value)
+
+
+def test_short_reads_of_a_correct_run_are_never_refused():
+    """One residue gets no verdict on the Asn, Gln and Thr rule from a handful of frames: a mean over five
+    is too easily on the wrong side when the frames are close in time or coarsely stored."""
+    u = ensembles._universe(TOP, TRAJ)
+    rng = np.random.default_rng(0)
+    for _ in range(150):
+        n, stride = int(rng.integers(1, 30)), int(rng.integers(1, 4))
+        start = int(rng.integers(0, len(u.trajectory) - n * stride))
+        check = ensembles._Bonds(u)
+        for frame in range(start, start + n * stride, stride):
+            ts = u.trajectory[frame]
+            ts.positions = np.round(ts.positions, 1)
+            assert check.frame(ts) is None
+        assert check.close() is None
+    tally = ensembles._Tally(2)       # two frames that happen to agree: no spread, and still no verdict
+    for frame in (1, 2, 3):
+        tally.add(np.array([0.06, -0.09]), frame)
+    assert not len(tally.above(0.045, 6.0, 20)[1]) and len(tally.above(0.045, 6.0, 3)[1]) == 1
+
+
+def test_whole_residues_that_changed_places_are_refused(tmp_path):
+    """Two lysines with each other's coordinates: every bond within a residue is right, the peptide bonds
+    to their neighbours are not."""
+    def change(u, ts):
+        xyz = ts.positions.copy()
+        a, b = (u.select_atoms(sel).indices for sel in ('chainID A and resid 27', 'chainID D and resid 21'))
+        xyz[a], xyz[b] = ts.positions[b], ts.positions[a]
+        return xyz
+    path = _rewritten(tmp_path / 'exchanged.dcd', change, 3)
+    said = 'the backbone N of LYS 27 of chain A is bonded to the C of LEU 20 of chain D, which is not the residue'
+    with pytest.raises(ValueError, match=f'in frame 1 {said} before it .*whole residues have changed places'):
+        ensembles.md(TOP, path, chains=['A', 'D'])
+
+
+def test_amide_swap_in_part_of_a_run_is_refused(tmp_path):
+    """An Asn at the interface with its oxygen and nitrogen exchanged in the second half of the frames: the
+    mean over the whole run is near zero, the mean over 50 frames in a row is not."""
+    def change(u, ts):
+        xyz = ts.positions.copy()
+        if ts.frame >= 100:
+            o, n = (u.select_atoms(f'chainID D and resid 33 and name {x}').indices for x in ('OD1', 'ND2'))
+            xyz[o], xyz[n] = ts.positions[n], ts.positions[o]
+        return xyz
+    path = _rewritten(tmp_path / 'half.dcd', change, 200)
+    said = 'over the 50 frames read from 101 to 150, in ASN 33 of chain D, .*The frames before fit the topology'
+    with pytest.raises(ValueError, match=said):
+        ensembles.md(TOP, path, chains=['A', 'D'], max_frames=None)
 
 
 def test_residues_cut_by_the_box_are_not_taken_for_a_wrong_trajectory(tmp_path, reference):
@@ -446,6 +496,11 @@ def test_missing_residues_do_not_split_a_chain(tmp_path):
     (tmp_path / 'long.pdb').write_text(''.join(long))
     table = '\n'.join(ensembles.nma(str(tmp_path / 'long.pdb'), frames=4).log)
     assert 'A has no residues between ' in table and table.count(' residues, ') == 6
+    # one chain ID for everything, as MDAnalysis writes a selection without chains, is no chain ID
+    same = [l[:21] + 'X' + l[22:72] + 'SYST' + l[76:] if l.startswith(('ATOM', 'HETATM')) else l for l in open(TOP)]
+    (tmp_path / 'x.pdb').write_text(''.join(same))
+    ens = ensembles.nma(str(tmp_path / 'x.pdb'), frames=4)
+    assert ens.chains == ('A', 'B') and 'no chain IDs in the topology' in '\n'.join(ens.log)
 
 
 def test_calpha_only_model_is_refused_with_the_reason(tmp_path):
@@ -463,7 +518,10 @@ def test_calpha_only_model_is_refused_with_the_reason(tmp_path):
                                          and l[12:16].strip() not in backbone and l[76:78].strip() != 'H')]
     only.write_text(''.join(some))
     log = ' '.join(ensembles.nma(str(only), frames=4).log)
-    assert re.search(r'\d of 165 residues have no side-chain atoms in the file', log)
+    assert re.search(r'\d of 165 residues have no side-chain atoms in the file \(A:2\d, ', log)
+    renamed = [l[:17] + 'ALA' + l[20:] for l in open(TOP) if l.startswith('ATOM') and l[12:16].strip() in backbone]
+    only.write_text(''.join(renamed))
+    assert 'Every amino acid is Gly, Ala or of an unknown kind' in ' '.join(ensembles.nma(str(only), frames=4).log)
 
 
 def test_pdb_without_chain_ids_gets_its_chains_lettered(tmp_path):

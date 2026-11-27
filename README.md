@@ -83,9 +83,11 @@ trajectory (xtc, trr, dcd, nc ...). Nothing needs preparing by hand:
   a `TER` record, where the residue numbers start again, where the segment changes, and where the backbone
   is not bonded to the residue before. One exception: a hole in the numbering that the missing residues
   could span (3.8 Å each) is a loop the structure does not show, not a new chain, and the table says so.
-  In a file without `TER` records, two chains whose numbers run on (one ends at 110, the next starts at
-  201) are taken for one that way, and so are the pieces of a cleaved protein (chymotrypsin, 1CHO): read
-  the table, and name the sides with `--select` when it is wrong. With `TER` records the pieces of a
+  In a file without `TER` records, two chains whose numbers run on with a hole between them (one ends at
+  110, the next starts at 201) are taken for one that way whenever their ends are close enough for the
+  hole (3.8 Å for each number of the step), and so are the pieces of a cleaved protein (chymotrypsin,
+  1CHO): read the table, and name the sides with `--select` when it is wrong. A file with chain `X` for every
+  atom (what MDAnalysis writes for a selection without chains) is lettered the same way. With `TER` records the pieces of a
   cleaved protein are separate chains, and the pair with most contacts may be two of them.
 
   ```
@@ -121,24 +123,29 @@ trajectory (xtc, trr, dcd, nc ...). Nothing needs preparing by hand:
 - **Topology and trajectory must be of the same run.** The same protein set up by two programs lists its
   atoms in a different order (GROMACS puts a residue's C and O last, OpenMM and the PDB before the side
   chain), and coordinates would then land on the wrong atoms. In each frame it reads, ppi-tango measures
-  the bonds of every amino acid: N-CA, CA-C, C-O, CA-CB and those of the side chain, across the periodic
-  box, so residues cut by a box face are fine. It stops at the first bond more than 0.4 Å off its usual
-  length and names the residue and the frame, also when a trajectory fits at first and not later (two runs
-  joined). What this cannot see:
+  the bonds within every amino acid (N-CA, CA-C, C-O, CA-CB and those of the side chain) across the periodic
+  box, so residues cut by a box face are fine, and checks that every backbone N is bonded to the C of the
+  residue before it and to no other. It stops at the first bond more than 0.4 Å off its usual length, or
+  the first N on the wrong C, and names the residue and the frame, also when a trajectory fits at first and
+  not later (two runs joined). What this cannot see:
   - An amide oxygen and nitrogen (Asn, Gln), or the oxygen and methyl group of Thr, that have changed
-    places: the two bonds differ by 0.1 Å, less than a bond moves in one frame. These are judged once, over
-    all frames read, per residue and for all residues of a kind together: the bond that should be shorter
-    has to be longer on average, by 0.045 Å at least and by six times the uncertainty of that average.
-    A swap in a few residues needs some ten frames to show (more in a hot run or with coarsely stored
-    coordinates), and a swap in part of the trajectory only can go unseen.
+    places in a single frame: the two bonds differ by 0.1 Å, less than a bond moves. These are judged by
+    the mean over many frames: over every 50 frames read in a row, and over all frames read. The bond that
+    should be shorter has to be longer on average, by 0.045 Å at least and by six times the standard error
+    of the mean (widened for frames that are close in time and move together). One residue gets a verdict
+    of its own from 20 read frames on; with fewer, only all residues of a kind together are judged, which
+    takes five of them. So a swap in a few residues goes unseen when fewer than 20 frames are read, and so
+    does a swap that lasts fewer than some 50 read frames of a longer run.
   - Atoms swapped within a symmetric group (the two oxygens of Asp or Glu, the ring sides of Phe and Tyr,
     the methyl groups of Val and Leu, the end nitrogens of Arg) or a flipped His ring: the bond lengths are
     the same.
   - Frames that `--stride` and `--max-frames` skip.
+  - Hydrogens, which are not read at all.
   - Nucleotides, and residues with other names than the twenty standard ones and their force-field
     variants, beyond their backbone: nucleotides are measured in the first frame only, by kind of bond.
-  - Coordinates stored with one decimal in nm or fewer (xtc precision 10) put bonded atoms on one spot and
-    are refused; two decimals (precision 100) are read.
+
+  Coordinates stored with one decimal in nm or fewer (xtc precision 10) put bonded atoms on one spot and
+  are refused, with that reason; two decimals (precision 100) are read.
 - **Long trajectories**: 200 evenly spaced frames are analysed (`--max-frames`, `--stride`), and only those
   are read, so trajectory length hardly matters.
 
@@ -152,7 +159,7 @@ ppitango fep top.pdb window_*.dcd --chains A D --dg dg.csv --label "barstar Y29 
 
 `dg.csv` has one row per window and a `dG` column (cumulative free energy, kcal/mol, from
 alchemlyb / pymbar / your FEP package). The free energy curve is drawn against λ next to the
-contacts that go with it. An optional `lambda` column gives each window's λ, rising from row to row; without
+contacts that go with it. An optional `lambda` column gives each window's λ, between 0 and 1 and rising from row to row; without
 it the windows are spaced evenly from 0 to 1. The frames of a window are spread over the stretch to the next window so that the
 axis keeps moving: the λ shown for a frame is where it sits on that path, not a λ it was simulated at (all
 frames of window 3 were run at the λ of window 3).
@@ -320,9 +327,12 @@ the contacts of the reference run (`tests/test_trajectory.py` keeps the core of 
 What does not work, or needs care:
 
 - **Cα-only, backbone-only and coarse-grained models** are not read: a residue is recognised by its N and
-  CA atoms (or a sugar C4'), and the contacts need all heavy atoms. A model whose residues have no side
-  chains stops with that message; when only some are cut short (unresolved side chains of a crystal
-  structure), the run says how many, and those residues show backbone contacts only.
+  CA atoms (or a sugar C4'), and the contacts need all heavy atoms. When more than 90 % of the
+  residues that should have a side chain (all but Gly and Ala) have no atom beyond CB, the run stops and
+  says that this is a backbone model. Below that (unresolved side chains of a crystal structure) it says
+  how many and which, and those residues show backbone contacts only: look whether they sit at the
+  interface. A backbone whose residues were all renamed to Ala, Gly or UNK cannot be told from a real
+  poly-Ala: it runs, with a line saying so.
 - **A trajectory for an unusual part of the system.** A trajectory and a topology with different atom
   counts are matched up as described above. A custom index group (one chain of several, a hand-picked
   region) is not recognised and stops with an error saying both counts: write the topology for that group

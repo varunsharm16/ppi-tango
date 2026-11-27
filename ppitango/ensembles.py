@@ -55,8 +55,13 @@ class Ensemble:
                                  'first (PDBFixer, Modeller, SCWRL)')
             if bare.any():
                 one = int(bare.sum()) == 1
+                who = [f'{c}:{r}' for c, r in bare.index[bare.values][:8]]
                 self.log.append(f'{int(bare.sum())} of {len(bare)} residues {"has" if one else "have"} no side-chain '
-                                f'atoms in the file: {"it" if one else "they"} can only show backbone contacts')
+                                f'atoms in the file ({", ".join(who)}{" ..." if bare.sum() > 8 else ""}): '
+                                f'{"it" if one else "they"} can only show backbone contacts')
+        elif (self.atoms.kind == 'protein').any():
+            self.log.append('Every amino acid is Gly, Ala or of an unknown kind: if this is a backbone model with '
+                            'its residues renamed, the contacts are those of the backbone only')
 
     @property
     def labels(self) -> pd.Series:
@@ -215,7 +220,8 @@ def _plain_pdb(path: str, chains=None) -> bool:
         return False
     with open(path, errors='replace') as f:
         atoms = [line for line in f if line.startswith('ATOM')]
-    if any(not line[21:22].strip() for line in atoms):
+    # no chain IDs, or X for everything (what MDAnalysis writes for atoms without one): geometry tells the chains
+    if any(not line[21:22].strip() for line in atoms) or {line[21:22] for line in atoms} == {'X'}:
         return False
     return bool(chains) or not any(line[12:16].strip() in ("C4'", 'C4*') for line in atoms)
 
@@ -300,7 +306,10 @@ def nma(pdb: str, chains: Optional[Sequence[str]] = None, mode: int = 1, rmsd: f
     if mode > 3 * is_node.sum() - 6:
         raise ValueError(f'--mode {mode}: the elastic network of {is_node.sum()} residues has '
                          f'{3 * is_node.sum() - 6} modes')
-    vals, modes = anm_modes(xyz[is_node], cutoff, n_modes=mode)
+    try:
+        vals, modes = anm_modes(xyz[is_node], cutoff, n_modes=mode)
+    except ValueError as e:      # the chains as they were read tell why (two taken for one, a far-off copy)
+        raise ValueError('\n'.join([str(e), *log])) from e
     disp = modes[mode - 1]
     disp = disp / np.sqrt((disp ** 2).sum(-1).mean()) * rmsd      # node RMSD = rmsd at full swing
     per_atom = disp[res_key.map(node_of).values]
@@ -644,6 +653,37 @@ SHORTER = {'ASN': (('CG', 'OD1'), ('CG', 'ND2')), 'GLN': (('CD', 'OE1'), ('CD', 
 BACKBONE_BONDS = [('N', 'CA', 1.46), ('CA', 'C', 1.52), ('C', 'O', 1.23), ('CA', 'CB', 1.53)]
 
 
+class _Tally:
+    """Running mean of a quantity per residue over frames, with what it takes to say how sure that mean is."""
+
+    def __init__(self, n):
+        self.n, self.total, self.squares, self.lagged, self.last = 0, np.zeros(n), np.zeros(n), np.zeros(n), None
+        self.first = None
+
+    def add(self, x, frame):
+        self.n += 1
+        self.total += x
+        self.squares += x * x
+        if self.last is not None:
+            self.lagged += x * self.last
+        self.last, self.first, self.end = x, self.first or frame, frame
+
+    def above(self, least, sure, frames):
+        """Which residues have a mean above `least` and `sure` standard errors above zero, and whether all
+        residues together do. A residue gets a verdict of its own from `frames` frames on; frames read close in
+        time move together, which the standard error is widened for (lag-1 autocorrelation). All together are
+        judged by how the residues differ from each other, which needs five of them and no number of frames."""
+        mean = self.total / self.n
+        each = np.zeros(len(mean), bool)
+        if self.n >= frames:
+            var = np.maximum(self.squares / self.n - mean ** 2, 0)
+            r = np.clip((self.lagged / (self.n - 1) - mean ** 2) / np.where(var > 0, var, 1), 0, 0.98)
+            each = (mean > least) & (mean > sure * np.sqrt(var / (self.n - 1) * (1 + r) / (1 - r)))
+        together = len(mean) >= 5 and mean.mean() > least and \
+            mean.mean() > sure * mean.std(ddof=1) / np.sqrt(len(mean))
+        return mean, np.where(each)[0], bool(together)
+
+
 class _Bonds:
     """Does every atom sit under its own name, in every frame that is read? `_misfit` looks at the first frame
     and at whole kinds of bond; a topology that lists the atoms of some residues in another order than the
@@ -652,20 +692,25 @@ class _Bonds:
     The bonds of the backbone and of the side chain of every amino acid are measured in each frame given to
     `frame`, across the periodic box (a residue cut by a box face is whole to this check). A bond more than
     0.4 Å off its usual length is a wrong atom: no force field stretches a bond that far, and the nearest
-    non-bonded atom is 0.9 Å further.
+    non-bonded atom is 0.9 Å further. The backbone N of a residue has to be bonded to the C of the residue
+    before it and to no other: that is what tells when whole residues have changed places.
 
     An amide oxygen and nitrogen, or the oxygen and methyl group of Thr, differ by 0.1 Å only, less than one
-    bond moves in one frame. `close` judges those over all frames read: the shorter bond has to come out
-    longer on average, by half the 0.1 Å at least and by six times the uncertainty of that average as the frames
-    themselves show it. A hot
-    run or coarsely stored coordinates widen the spread and with it what is asked for, so noise alone does not
-    refuse a file. `frame` and `close` return None when all is well, else what is not."""
-    TOLERANCE, SURE, LONGER = 0.4, 6.0, 0.045
+    bond moves in one frame. Those are judged by the mean over many frames: over every 50 frames read in a
+    row, and over all of them in `close`. The shorter bond has to come out longer by half the 0.1 Å at least
+    and by six times the uncertainty of the mean as the frames themselves show it, so a hot run or coarsely
+    stored coordinates ask for more and noise alone refuses no file. See `_Tally.above` for when one residue
+    is judged and when all of a kind.
+
+    `frame` and `close` return None when all is well, else what is not; `coarse` is set when the reason is the
+    precision of the coordinates and not their order."""
+    TOLERANCE, SURE, LONGER, FRAMES, BLOCK = 0.4, 6.0, 0.045, 20, 50
 
     def __init__(self, u):
-        self.u = u
+        self.u, self.coarse, self.later = u, False, False
         names, resnames, resix = _attr(u.atoms, 'names'), _attr(u.atoms, 'resnames'), u.atoms.resindices
         i, j, length, self.what, self.pairs = [], [], [], [], []
+        self.n, self.c = np.zeros(0, int), np.zeros(0, int)
         if names is not None and resnames is not None:
             same = {pair: canonical(*pair) for pair in set(zip(resnames, names))}
             canon = np.array([same[p] for p in zip(resnames, names)])
@@ -692,57 +737,73 @@ class _Bonds:
                     _, a, b = np.intersect1d(found[short][0], found[long][0], return_indices=True)
                     if len(a):
                         self.pairs.append((res, short, long, found[short][1][a], found[long][1][b]))
+            self.n, self.c = (np.where(amino & (canon[:, 1] == name))[0] for name in ('N', 'C'))
         self.i, self.j = (np.concatenate(x) if x else np.zeros(0, int) for x in (i, j))
         self.length = np.array(length)
-        self.frames, self.sum, self.squares = 0, np.zeros(len(self.i)), np.zeros(len(self.i))
-        self.sums = [[np.zeros(len(a)), np.zeros(len(a))] for *_, a, _ in self.pairs]
+        self.frames = 0
+        self.run, self.block = ([_Tally(len(a)) for *_, a, _ in self.pairs] for _ in range(2))
 
-    def _residue(self, k):
-        atom = self.u.atoms[int(self.i[k])]
+    def _residue(self, atom):
+        atom = self.u.atoms[int(atom)]
         chain = getattr(atom, 'chainID', '') or ''
         return f'{atom.resname} {atom.resid}' + (f' of chain {chain}' if chain.strip() not in ('', 'X') else '')
 
     def frame(self, ts):
         if not len(self.i):
             return None
-        from MDAnalysis.lib.distances import calc_bonds
+        from MDAnalysis.lib.distances import calc_bonds, capped_distance
         box = ts.dimensions if ts.dimensions is not None and ts.dimensions[:3].min() > 0 else None
         d = calc_bonds(ts.positions[self.i], ts.positions[self.j], box=box)
         off = np.where(np.abs(d - self.length) > self.TOLERANCE)[0]
         if len(off):
             k = off[np.abs(d - self.length)[off].argmax()]
             one, two = self.what[k]
-            return (f'in frame {ts.frame + 1} the bonded atoms {one} and {two} of {self._residue(k)} are '
+            self.coarse, self.later = bool((d[off] < 0.3).any()), self.frames >= 5
+            return (f'in frame {ts.frame + 1} the bonded atoms {one} and {two} of {self._residue(self.i[k])} are '
                     f'{d[k]:.1f} Å apart ({self.length[k]:.1f} Å when they are bonded)'
                     + (f', and {len(off) - 1} more bonds are off' if len(off) > 1 else '')
                     + ('. The trajectory holds no box: if its molecules were wrapped into the periodic box, '
-                       'that cannot be undone' if box is None and d[k] > 10 else '')
-                    + ('. Bonded atoms sit on the same spot: were the coordinates stored with very few digits?'
-                       if (d[off] < 0.3).any() else ''))
+                       'that cannot be undone' if box is None and d[k] > 10 else ''))
+        # the peptide bond: every N next to a C (1.33 Å) has to be next to the C of the residue before it
+        near = capped_distance(ts.positions[self.n], ts.positions[self.c], 1.7, box=box, return_distances=False)
+        if len(near):
+            n, c = self.n[near[:, 0]], self.c[near[:, 1]]
+            resix = self.u.atoms.resindices
+            wrong = np.where(resix[c] != resix[n] - 1)[0]
+            if len(wrong):
+                k, self.later = wrong[0], self.frames >= 5
+                return (f'in frame {ts.frame + 1} the backbone N of {self._residue(n[k])} is bonded to the C of '
+                        f'{self._residue(c[k])}, which is not the residue before it'
+                        + (f' (and {len(wrong) - 1} more like it)' if len(wrong) > 1 else '')
+                        + ': whole residues have changed places')
         self.frames += 1
-        for (_, _, _, a, b), sums in zip(self.pairs, self.sums):
-            sums[0] += d[a] - d[b]
-            sums[1] += (d[a] - d[b]) ** 2
+        for (_, _, _, a, b), run, block in zip(self.pairs, self.run, self.block):
+            run.add(d[a] - d[b], ts.frame + 1)
+            block.add(d[a] - d[b], ts.frame + 1)
+        if self.frames % self.BLOCK == 0:
+            wrong, self.later = self._changed_places(self.block), self.frames > self.BLOCK
+            self.block = [_Tally(len(a)) for *_, a, _ in self.pairs]
+            return wrong
         return None
 
     def close(self):
-        """The Asn, Gln and Thr rule, over all frames read: for each residue, and for all of a kind together
-        (which is what tells when there are few frames)."""
-        n = self.frames
-        for (res, short, long, a, _), (total, squares) in zip(self.pairs, self.sums):
-            def longer(total, squares, count):
-                mean = total / count
-                spread = np.sqrt(np.maximum(squares / count - mean ** 2, 0) / max(count - 1, 1))
-                return (mean > self.LONGER) & (mean > self.SURE * spread)
-            each = np.where(longer(total, squares, n))[0] if n >= 5 else []
+        self.later = False
+        return self._changed_places(self.run) if self.frames else None
+
+    def _changed_places(self, tallies):
+        """The Asn, Gln and Thr rule over the frames of these tallies."""
+        for (res, short, long, a, _), tally in zip(self.pairs, tallies):
+            mean, each, together = tally.above(self.LONGER, self.SURE, self.FRAMES)
             if len(each):
-                who = self._residue(a[each[0]]) + (f' and {len(each) - 1} more' if len(each) > 1 else '')
-                by = total[each[0]] / n
-            elif n * len(a) >= 5 and longer(total.sum(), squares.sum(), n * len(a)):
-                who, by = f'the {len(a)} {res}', total.sum() / (n * len(a))
+                who = self._residue(self.i[a[each[0]]]) + (f' and {len(each) - 1} more' if len(each) > 1 else '')
+                by = mean[each[0]]
+            elif together:
+                who, by = f'the {len(a)} {res}', mean.mean()
             else:
                 continue
-            return (f'over the {n} frame{"s" * (n > 1)} read, in {who}, the bond {short[0]}-{short[1]} is {by:.2f} Å '
+            n = tally.n
+            return (f'over the {n} frame{"s" * (n > 1)} read' + (f' from {tally.first} to {tally.end}' * (n > 1))
+                    + f', in {who}, the bond {short[0]}-{short[1]} is {by:.2f} Å '
                     f'longer than {long[0]}-{long[1]} on average; it is 0.1 Å shorter in a real {res}: '
                     f'{short[1]} and {long[1]} have changed places')
         return None
@@ -1153,10 +1214,14 @@ def _read_trajectory(top: str, traj: Optional[str], chains, stride: int = 1, max
     check = _Bonds(u) if traj else None
 
     def other_run(wrong):
+        if check.coarse:
+            return ValueError(f'{traj}: {wrong}. Bonded atoms sit on the same spot: the coordinates are stored '
+                              'with too few digits to tell atoms apart. Save the trajectory with more (xtc: '
+                              'compressed-x-precision 1000, the usual value)')
         return ValueError(
             f'{traj} does not belong to {top}: {wrong}. ' +
             ('The frames before fit the topology: was the trajectory joined from runs that were set up '
-             'differently?' if check.frames >= 5 and 'in frame' in wrong else
+             'differently?' if check.later else
              'The two files list the atoms in a different order (written by different programs?) or are '
              'different systems.') + ' Give the topology the trajectory was run with.')
     for i in keep:
@@ -1277,6 +1342,9 @@ def fep(top: str, windows: Sequence[str], chains: Optional[Sequence[str]] = None
                 raise ValueError(f'--dg {dg}: the {column} column needs a number in every row; row {bad[0] + 1} '
                                  + ('is empty' if pd.isna(held) else f'holds {str(held)!r}'))
             table[column] = values.astype(float)
+    if table is not None and 'lambda' in table and not table['lambda'].between(0, 1).all():
+        raise ValueError(f'--dg {dg}: the lambda column runs from {table["lambda"].min():g} to '
+                         f'{table["lambda"].max():g}; lambda is the progress of the perturbation, from 0 to 1')
     if table is not None and 'lambda' in table and not (np.diff(table['lambda']) > 0).all():
         raise ValueError(f'--dg {dg}: the lambda column has to rise from one row to the next (it holds '
                          f'{", ".join(f"{v:g}" for v in table["lambda"][:4])}{" ..." * (len(table) > 4)}). Give '

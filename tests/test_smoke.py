@@ -1,5 +1,6 @@
 """End-to-end checks on a small synthetic two-chain complex (no downloads, a few seconds)."""
 import os
+import sys
 
 import numpy as np
 import pytest
@@ -134,7 +135,7 @@ def test_cli_checks_options_before_working(pdb, tmp_path, capsys):
     with pytest.raises(SystemExit) as e:
         main(['fep', pdb, pdb, '--dg', str(tmp_path / 'none.csv')])
     assert 'none.csv' in str(e.value)
-    for item in ('A:x', ':3', 'A', 'A:1:2'):
+    for item in ('A:x', ':3', ' :3', 'A', 'A:1:2'):
         with pytest.raises(SystemExit) as e:
             main(['nma', pdb, '--renumber', item])
         assert e.value.code == 2 and 'CHAIN:FIRST' in capsys.readouterr().err
@@ -143,6 +144,7 @@ def test_cli_checks_options_before_working(pdb, tmp_path, capsys):
                        ('window,dG\n0,0.5\n1,\n', 'the dG column needs a number in every row; row 2 is empty'),
                        ('window,dG\n0,0,5\n1,1,5\n', 'row 1 holds 3 values and the header names 2 columns'),
                        ('lambda,dG\n1,0\n0,1\n', 'the lambda column has to rise'),
+                       ('lambda,dG\n-0.5,0\n3,1\n', 'the lambda column runs from -0.5 to 3'),
                        ('lambda,dG\n0.5,0\n0.5,1\n', 'the lambda column has to rise')):
         (tmp_path / 'dg.csv').write_text(text)
         with pytest.raises(SystemExit) as e:
@@ -186,6 +188,17 @@ def test_cli_output_folder(pdb, tmp_path, capsys):
             assert 'cannot write to' in str(e.value) and 'analysed' not in capsys.readouterr().out
     finally:
         locked.chmod(0o755)
+
+
+def test_output_cut_short_by_a_pipe(pdb, tmp_path):
+    """`ppitango ... | head -1`: the reader goes away, the run still writes its files and ends well."""
+    import subprocess
+    run = subprocess.Popen([sys.executable, '-m', 'ppitango.cli', 'nma', pdb, '--frames', '4', '--no-movie',
+                            '--no-viewer', '-o', str(tmp_path / 'cut')], stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE)
+    run.stdout.readline()
+    run.stdout.close()
+    assert run.wait() == 0 and run.stderr.read() == b'' and len(os.listdir(tmp_path)) == 2
 
 
 def test_version():

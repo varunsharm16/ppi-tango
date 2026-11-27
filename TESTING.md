@@ -43,6 +43,9 @@ What we get, to compare with:
 | md | `traj · molecular dynamics: chains A and D, 200 frames, 1565 heavy atoms` | 9813 |
 | fep | 12 windows, 10 frames each | 5929 |
 
+The nma run prints one line before that one: the crystal structure lacks the side chain of one residue
+(`1 of 165 residues has no side-chain atoms in the file (D:61): ...`).
+
 Each run writes `*_contacts.mp4`, `*_viewer.html`, `*_contacts.csv` and `*_buried_surface.csv`; `--movie3d`
 adds `*_3d.mp4`, `--gif` the GIFs. Our own outputs of these commands are in [`demos/`](demos) to compare by eye.
 Things to check in them:

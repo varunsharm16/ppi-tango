@@ -119,9 +119,10 @@ def _frame(job):
     pdb_text, a, b, cutoff = job
     from pandappi import PandaPPI
     from pandappi.reports import generator
-    with tempfile.NamedTemporaryFile('w', suffix='.pdb', delete=False) as f:
-        f.write(pdb_text)
+    f = tempfile.NamedTemporaryFile('w', suffix='.pdb', delete=False)
     try:
+        with f:              # a write that fails (disk full) must not leave the file behind either
+            f.write(pdb_text)
         with contextlib.redirect_stdout(io.StringIO()):
             ppi = PandaPPI(f.name, [a, b])
             ppi.map_interactions(distance_cutoff=cutoff)

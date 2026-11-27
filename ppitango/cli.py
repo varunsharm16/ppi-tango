@@ -97,7 +97,46 @@ def _common(p):
     run.add_argument('--workers', type=_number(int, 1), default=None, help='parallel processes (default: all cores)')
 
 
+class _Pipe:
+    """Standard output that may be cut short (`ppitango ... | head`): what is printed after the reader has gone
+    is dropped and the run goes on to write its files."""
+    def __init__(self, stream):
+        self.stream, self.open = stream, True
+
+    def write(self, text):
+        if self.open:
+            try:
+                return self.stream.write(text)
+            except BrokenPipeError:
+                self.shut()
+        return len(text)
+
+    def flush(self):
+        if self.open:
+            try:
+                self.stream.flush()
+            except BrokenPipeError:
+                self.shut()
+
+    def shut(self):
+        self.open = False
+        with contextlib.suppress(OSError, ValueError, AttributeError):   # so that Python's own flush at exit is quiet
+            os.dup2(os.open(os.devnull, os.O_WRONLY), self.stream.fileno())
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
 def main(argv=None):
+    out, sys.stdout = sys.stdout, _Pipe(sys.stdout)
+    try:
+        _main(argv)
+        sys.stdout.flush()
+    finally:
+        sys.stdout = out
+
+
+def _main(argv=None):
     parser = _Parser(
         prog='ppitango', description='ppi-tango: animated protein-protein interface contacts '
                                      'from normal modes, molecular dynamics and free energy perturbation.')
@@ -145,7 +184,7 @@ def main(argv=None):
     source = args.pdb if args.command == 'nma' else args.topology if args.command == 'fep' else \
         args.trajectory or args.topology
     try:
-        renumber = {c: int(n) for c, n in (item.split(':') for item in args.renumber)} or None
+        renumber = {c.strip(): int(n) for c, n in (item.split(':') for item in args.renumber)} or None
         if renumber and '' in renumber:
             raise ValueError
     except ValueError:
